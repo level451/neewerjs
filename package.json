@@ -1,0 +1,27 @@
+{
+  "name": "neewer-light-controller",
+  "version": "1.0.0",
+  "description": "High-performance Node.js controller for Neewer LED lights",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "scan": "node src/examples/scan.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": [
+    "neewer",
+    "led",
+    "bluetooth",
+    "ble",
+    "lighting"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@stoprocent/noble": "^1.15.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
