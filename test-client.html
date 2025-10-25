@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neewer Light Controller</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            margin-bottom: 30px;
+            font-size: 2em;
+        }
+
+        .connection-status {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            margin-bottom: 20px;
+        }
+
+        .connection-status.connected {
+            background: #10b981;
+            color: white;
+        }
+
+        .connection-status.disconnected {
+            background: #ef4444;
+            color: white;
+        }
+
+        .lights-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .light-card {
+            background: #2a2a2a;
+            border-radius: 12px;
+            padding: 20px;
+            border: 2px solid #3a3a3a;
+        }
+
+        .light-card.connected {
+            border-color: #10b981;
+        }
+
+        .light-card.disconnected {
+            border-color: #ef4444;
+            opacity: 0.6;
+        }
+
+        .light-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .light-name {
+            font-size: 1.2em;
+            font-weight: bold;
+        }
+
+        .light-status {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #ef4444;
+        }
+
+        .light-card.connected .light-status {
+            background: #10b981;
+        }
+
+        .control-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+            color: #aaa;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: #3a3a3a;
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #10b981;
+            cursor: pointer;
+        }
+
+        input[type="range"]::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #10b981;
+            cursor: pointer;
+            border: none;
+        }
+
+        .value-display {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+
+        .global-controls {
+            background: #2a2a2a;
+            border-radius: 12px;
+            padding: 20px;
+            border: 2px solid #3a3a3a;
+        }
+
+        .global-controls h2 {
+            margin-bottom: 20px;
+        }
+
+        button {
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1em;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+
+        button:hover {
+            background: #059669;
+        }
+
+        button:disabled {
+            background: #3a3a3a;
+            cursor: not-allowed;
+        }
+
+        .mac-address {
+            font-size: 0.8em;
+            color: #666;
+            font-family: 'Courier New', monospace;
+        }
+
+        .timestamp {
+            font-size: 0.8em;
+            color: #666;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>🎬 Neewer Light Controller</h1>
+    <div class="connection-status" id="wsStatus">Connecting...</div>
+
+    <div class="lights-grid" id="lightsGrid"></div>
+
+    <div class="global-controls">
+        <h2>Global Controls</h2>
+        <div class="control-group">
+            <label>All Lights - Brightness: <span id="globalBrightness">50</span>%</label>
+            <input type="range" id="globalBrightnessSlider" min="0" max="100" value="50">
+        </div>
+        <div class="control-group">
+            <label>All Lights - Temperature: <span id="globalTemp">5600</span>K</label>
+            <input type="range" id="globalTempSlider" min="3200" max="8500" value="5600" step="100">
+        </div>
+        <button onclick="setAllLights()">Apply to All Lights</button>
+        <button onclick="turnAllOff()">Turn All Off</button>
+        <div class="timestamp" id="lastUpdate"></div>
+    </div>
+</div>
+
+<script>
+    let ws = null;
+    let lights = {};
+
+    // Connect to WebSocket
+    function connect() {
+        ws = new WebSocket('ws://localhost:8080');
+
+        ws.onopen = () => {
+            console.log('Connected to server');
+            document.getElementById('wsStatus').textContent = '🟢 Connected';
+            document.getElementById('wsStatus').className = 'connection-status connected';
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log('Received:', data);
+
+            if (data.error) {
+                alert(`Error: ${data.message}`);
+                return;
+            }
+
+            if (data.lights) {
+                updateLights(data);
+            }
+        };
+
+        ws.onclose = () => {
+            console.log('Disconnected from server');
+            document.getElementById('wsStatus').textContent = '🔴 Disconnected';
+            document.getElementById('wsStatus').className = 'connection-status disconnected';
+
+            // Try to reconnect after 3 seconds
+            setTimeout(connect, 3000);
+        };
+
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+        };
+    }
+
+    // Update lights display
+    function updateLights(status) {
+        lights = status.lights;
+        const grid = document.getElementById('lightsGrid');
+        grid.innerHTML = '';
+
+        lights.forEach((light, index) => {
+            const card = document.createElement('div');
+            card.className = `light-card ${light.connected ? 'connected' : 'disconnected'}`;
+            card.innerHTML = `
+          <div class="light-header">
+            <div class="light-name">${light.name}</div>
+            <div class="light-status"></div>
+          </div>
+          <div class="mac-address">${light.mac}</div>
+          <div class="control-group">
+            <label>Brightness: <span id="bright-${index}">${light.brightness}</span>%</label>
+            <input type="range" min="0" max="100" value="${light.brightness}"
+                   onchange="setLight('${light.mac}', this.value, document.getElementById('temp-slider-${index}').value)"
+                   ${!light.connected ? 'disabled' : ''}>
+          </div>
+          <div class="control-group">
+            <label>Temperature: <span id="temp-${index}">${light.temperature}</span>K</label>
+            <input type="range" id="temp-slider-${index}" min="3200" max="8500" value="${light.temperature}" step="100"
+                   onchange="setLight('${light.mac}', document.getElementById('bright-${index}').parentElement.querySelector('input').value, this.value)"
+                   ${!light.connected ? 'disabled' : ''}>
+          </div>
+        `;
+            grid.appendChild(card);
+
+            // Update value displays on slider input
+            const brightSlider = card.querySelector('input[type="range"]');
+            const tempSlider = card.querySelector('#temp-slider-' + index);
+
+            brightSlider.addEventListener('input', (e) => {
+                document.getElementById(`bright-${index}`).textContent = e.target.value;
+            });
+
+            tempSlider.addEventListener('input', (e) => {
+                document.getElementById(`temp-${index}`).textContent = e.target.value;
+            });
+        });
+
+        // Update timestamp
+        document.getElementById('lastUpdate').textContent = `Last update: ${new Date(status.timestamp).toLocaleTimeString()}`;
+    }
+
+    // Set specific light
+    function setLight(mac, brightness, temperature) {
+        const command = {
+            action: 'setCCT',
+            mac: mac,
+            brightness: parseInt(brightness),
+            temperature: parseInt(temperature)
+        };
+        console.log('Sending:', command);
+        ws.send(JSON.stringify(command));
+    }
+
+    // Set all lights
+    function setAllLights() {
+        const brightness = document.getElementById('globalBrightnessSlider').value;
+        const temperature = document.getElementById('globalTempSlider').value;
+
+        const command = {
+            action: 'setCCT',
+            brightness: parseInt(brightness),
+            temperature: parseInt(temperature)
+        };
+        console.log('Sending to all:', command);
+        ws.send(JSON.stringify(command));
+    }
+
+    // Turn all lights off
+    function turnAllOff() {
+        const command = {
+            action: 'setCCT',
+            brightness: 0,
+            temperature: 5600
+        };
+        ws.send(JSON.stringify(command));
+    }
+
+    // Update global sliders display
+    document.getElementById('globalBrightnessSlider').addEventListener('input', (e) => {
+        document.getElementById('globalBrightness').textContent = e.target.value;
+    });
+
+    document.getElementById('globalTempSlider').addEventListener('input', (e) => {
+        document.getElementById('globalTemp').textContent = e.target.value;
+    });
+
+    // Connect on load
+    connect();
+</script>
+</body>
+</html>

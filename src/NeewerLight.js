@@ -1,15 +1,20 @@
 // NeewerLight class - represents a single Neewer light
+import { EventEmitter } from 'events';
 import { GATT_CHARACTERISTIC_UUID, LIGHT_TYPES } from './constants.js';
 
-export class NeewerLight {
+export class NeewerLight extends EventEmitter {
     constructor(peripheral) {
+        super();
         this.peripheral = peripheral;
+        this.peripheral.setMaxListeners(20); // Prevent memory leak warning
+        this.id = peripheral.id;
         this.id = peripheral.id;
         this.address = peripheral.address;
         this.name = peripheral.advertisement.localName || 'Unknown Neewer Light';
         this.rssi = peripheral.rssi;
         this.connected = false;
         this.characteristic = null;
+        this.notifyCharacteristic = null; // Store for polling
 
         // Light capabilities (will be determined on connection)
         this.capabilities = {
@@ -34,71 +39,183 @@ export class NeewerLight {
     /**
      * Connect to the light
      */
-    async connect(timeout = 15000) {
+    async connect(timeout = 12000, retries = 2) {
         if (this.connected) {
             console.log(`Light ${this.name} is already connected`);
             return;
         }
 
-        try {
-            console.log(`Connecting to ${this.name}...`);
+        let lastError = null;
 
-            // Add timeout to connection
-            const connectPromise = this.peripheral.connectAsync();
-            const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Connection timeout')), timeout)
-            );
+        for (let attempt = 1; attempt <= retries; attempt++) {
+            try {
+                if (attempt > 1) {
+                    console.log(`Retry attempt ${attempt}/${retries}...`);
+                    // Wait a bit between retries
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
 
-            await Promise.race([connectPromise, timeoutPromise]);
-            console.log(`Connected! Discovering services...`);
+                console.log(`Connecting to ${this.name}...`);
 
-            // Discover ALL services and characteristics for debugging
-            const { services, characteristics } = await this.peripheral.discoverAllServicesAndCharacteristicsAsync();
-
-            console.log(`Found ${services.length} service(s) and ${characteristics.length} characteristic(s)`);
-
-            // Log all discovered UUIDs for debugging
-            console.log('Services found:');
-            services.forEach(s => console.log(`  - ${s.uuid}`));
-
-            console.log('Characteristics found:');
-            characteristics.forEach(c => console.log(`  - ${c.uuid} (properties: ${c.properties.join(', ')})`));
-
-            // Try to find our characteristic
-            this.characteristic = characteristics.find(
-                c => c.uuid === GATT_CHARACTERISTIC_UUID
-            );
-
-            if (!this.characteristic) {
-                console.warn(`Could not find expected characteristic ${GATT_CHARACTERISTIC_UUID}`);
-                console.warn('Trying alternate characteristic search...');
-
-                // Try finding any writable characteristic
-                this.characteristic = characteristics.find(
-                    c => c.properties.includes('write') || c.properties.includes('writeWithoutResponse')
+                // Add timeout to connection
+                const connectPromise = this.peripheral.connectAsync();
+                const timeoutPromise = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Connection timeout')), timeout)
                 );
 
-                if (this.characteristic) {
-                    console.log(`Using alternate characteristic: ${this.characteristic.uuid}`);
+                await Promise.race([connectPromise, timeoutPromise]);
+                console.log(`Connected! Discovering services...`);
+
+                // Try to discover services with timeout
+                const discoverPromise = this.peripheral.discoverAllServicesAndCharacteristicsAsync();
+                const discoverTimeout = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Service discovery timeout')), 10000)
+                );
+
+                const { services, characteristics } = await Promise.race([discoverPromise, discoverTimeout]);
+
+                console.log(`Found ${services.length} service(s) and ${characteristics.length} characteristic(s)`);
+
+                // Find write characteristic
+                this.characteristic = characteristics.find(
+                    c => c.uuid === GATT_CHARACTERISTIC_UUID
+                );
+
+                if (!this.characteristic) {
+                    console.warn(`Could not find expected characteristic ${GATT_CHARACTERISTIC_UUID}`);
+                    console.warn('Trying alternate characteristic search...');
+
+                    this.characteristic = characteristics.find(
+                        c => c.properties.includes('write') || c.properties.includes('writeWithoutResponse')
+                    );
+
+                    if (this.characteristic) {
+                        console.log(`Using alternate characteristic: ${this.characteristic.uuid}`);
+                    } else {
+                        throw new Error('Could not find any writable characteristic');
+                    }
+                }
+
+                // Find notify characteristic for reading state changes
+                const notifyChar = characteristics.find(
+                    c => c.uuid === '69400003b5a3f393e0a9e50e24dcca99' && c.properties.includes('notify')
+                );
+
+                if (notifyChar) {
+                    console.log(`  Found notify characteristic: ${notifyChar.uuid}`);
+                    this.notifyCharacteristic = notifyChar; // Store for polling
+
+                    try {
+                        await notifyChar.subscribeAsync();
+                        console.log(`✓ Subscribed to notifications from ${this.name}`);
+
+                        notifyChar.on('data', (data) => {
+                            // Ignore empty or single-byte keepalive messages
+                            if (data.length < 5) {
+                                return;
+                            }
+                            console.log(`📩 ${this.name} notification data:`, Array.from(data).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
+                            this.parseNotification(data);
+                        });
+                    } catch (err) {
+                        console.log(`  ⚠ Could not subscribe to notifications: ${err.message}`);
+                    }
                 } else {
-                    throw new Error('Could not find any writable characteristic');
+                    console.log(`  ⚠ No notify characteristic found`);
+                }
+
+                this.connected = true;
+                console.log(`✓ Successfully connected to ${this.name}`);
+                console.log(`  Using characteristic: ${this.characteristic.uuid}`);
+                return; // Success!
+
+            } catch (error) {
+                lastError = error;
+                console.error(`Attempt ${attempt} failed:`, error.message);
+
+                // Try to disconnect if partially connected
+                try {
+                    await this.peripheral.disconnectAsync();
+                } catch (e) {
+                    // Ignore disconnect errors
+                }
+
+                // If this wasn't the last attempt, continue to retry
+                if (attempt < retries) {
+                    continue;
                 }
             }
+        }
 
-            this.connected = true;
-            console.log(`✓ Successfully connected to ${this.name}`);
-            console.log(`  Using characteristic: ${this.characteristic.uuid}`);
-        } catch (error) {
-            console.error(`Failed to connect to ${this.name}:`, error.message);
+        // All retries failed
+        throw new Error(`Failed to connect after ${retries} attempts: ${lastError.message}`);
+    }
 
-            // Try to disconnect if partially connected
-            try {
-                await this.peripheral.disconnectAsync();
-            } catch (e) {
-                // Ignore disconnect errors
+    /**
+     * Read current status from the light
+     */
+    async readStatus() {
+        if (!this.connected || !this.characteristic) {
+            return;
+        }
+
+        try {
+            // Just verify connection is alive by reading a characteristic
+            // Don't send any commands that would change the light state
+            if (this.notifyCharacteristic) {
+                // Try to read the notify characteristic (non-destructive)
+                await this.notifyCharacteristic.readAsync();
             }
+            // Connection is alive if we got here
 
-            throw error;
+        } catch (error) {
+            // Connection might be dead
+            if (error.message.includes('disconnected') || error.message.includes('not connected')) {
+                console.log(`${this.name} connection lost during status check`);
+                this.connected = false;
+                this.emit('disconnected');
+            }
+        }
+    }
+
+    /**
+     * Parse notification data from light (when values change)
+     */
+    parseNotification(data) {
+        // Ignore short messages
+        if (data.length < 5) {
+            return;
+        }
+
+        console.log(`🔍 Parsing notification from ${this.name}, length: ${data.length}`);
+
+        // Neewer lights send status updates as notifications
+        // Format: [0x78, 0x87, 0x02, brightness, temp, checksum] for CCT mode
+
+        if (data[0] === 0x78 && data[1] === 0x87) {
+            console.log(`  CCT mode notification detected`);
+            const brightness = data[3];
+            const tempByte = data[4];
+
+            // Convert temp byte back to Kelvin
+            const temperature = Math.round((tempByte - 32) / 53 * 6300 + 3200);
+
+            console.log(`  Parsed: brightness=${brightness}%, temp=${temperature}K`);
+            console.log(`  Current state: brightness=${this.state.brightness}%, temp=${this.state.cct}K`);
+
+            const changed = (this.state.brightness !== brightness || this.state.cct !== temperature);
+
+            this.state.brightness = brightness;
+            this.state.cct = temperature;
+
+            if (changed) {
+                console.log(`📢 ${this.name} state changed: ${brightness}% @ ${temperature}K`);
+                this.emit('stateChanged', { brightness, temperature });
+            } else {
+                console.log(`  No change detected`);
+            }
+        } else {
+            console.log(`  Unknown notification format (0x${data[0].toString(16)} 0x${data[1].toString(16)})`);
         }
     }
 
