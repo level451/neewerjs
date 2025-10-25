@@ -48,7 +48,7 @@ export class LightManager extends EventEmitter {
                     // Reset state to unknown when disconnected
                     light.state.brightness = 0;
                     light.state.cct = 5600;
-                    this.emitStatus();
+                    this.emitStatus(); // Send status on disconnect
                     this.scheduleReconnect(config.mac.toLowerCase());
                 });
 
@@ -62,7 +62,7 @@ export class LightManager extends EventEmitter {
                 light.on('disconnected', () => {
                     console.log(`${light.name} connection lost during operation`);
                     light.connected = false;
-                    this.emitStatus();
+                    this.emitStatus(); // Send status on disconnect
                     this.scheduleReconnect(config.mac.toLowerCase());
                 });
 
@@ -70,10 +70,25 @@ export class LightManager extends EventEmitter {
                 connectionPromises.push(
                     this.connectLight(config.mac.toLowerCase()).catch(err => {
                         console.error(`${light.name} initial connect failed:`, err.message);
+                        // Schedule reconnect even if initial connection fails
+                        this.scheduleReconnect(config.mac.toLowerCase());
                     })
                 );
             } else {
-                console.log(`⚠ ${config.name} (${config.mac}) not found`);
+                console.log(`⚠ ${config.name} (${config.mac}) not found - will keep trying to connect`);
+
+                // Create a light entry even if not discovered, so we can retry
+                const light = new NeewerLight({
+                    id: config.mac,
+                    address: config.mac,
+                    advertisement: { localName: config.name },
+                    rssi: 0
+                });
+                light.name = config.name;
+                this.lights.set(config.mac.toLowerCase(), light);
+
+                // Schedule reconnect attempts for missing lights
+                this.scheduleReconnect(config.mac.toLowerCase());
             }
         }
 
@@ -149,7 +164,8 @@ export class LightManager extends EventEmitter {
 
             await Promise.race([connectPromise, timeoutPromise]);
 
-            this.emitStatus();
+            console.log(`✓ ${light.name} connected successfully`);
+            this.emitStatus(); // Send status on successful connect
 
             // Cancel any reconnect timer
             if (this.reconnectTimers.has(mac)) {
@@ -179,7 +195,9 @@ export class LightManager extends EventEmitter {
      * Schedule reconnection attempt
      */
     scheduleReconnect(mac) {
-        if (this.reconnectTimers.has(mac)) return; // Already scheduled
+        if (this.reconnectTimers.has(mac)) {
+            return; // Already scheduled
+        }
 
         const light = this.lights.get(mac);
         console.log(`⏰ Will retry ${light?.name || mac} in ${this.reconnectInterval/1000} seconds`);
@@ -188,7 +206,31 @@ export class LightManager extends EventEmitter {
             this.reconnectTimers.delete(mac); // Remove timer reference
             const light = this.lights.get(mac);
             if (light && !light.connected) {
-                console.log(`\n🔄 Attempting to reconnect to ${light.name}...`);
+                console.log(`\n🔄 Reconnecting to ${light.name}...`);
+
+                // If we don't have a peripheral, rescan for it
+                if (!light.peripheral || !light.peripheral.address) {
+                    console.log(`  Rescanning for ${light.name}...`);
+                    try {
+                        const discovered = await this.scanner.scan(3000, false, 1);
+                        const found = discovered.find(l =>
+                            l.address.toLowerCase() === mac.toLowerCase()
+                        );
+                        if (found) {
+                            light.peripheral = found.peripheral;
+                            console.log(`  Found ${light.name}, connecting...`);
+                        } else {
+                            console.log(`  ${light.name} not found in scan`);
+                            this.scheduleReconnect(mac); // Try again
+                            return;
+                        }
+                    } catch (err) {
+                        console.log(`  Scan failed: ${err.message}`);
+                        this.scheduleReconnect(mac); // Try again
+                        return;
+                    }
+                }
+
                 await this.connectLight(mac);
             }
         }, this.reconnectInterval);
@@ -248,7 +290,11 @@ export class LightManager extends EventEmitter {
     getStatus() {
         const status = {
             timestamp: new Date().toISOString(),
-            lights: []
+            lights: [],
+            light_1: false,
+            light_2: false,
+            light_3: false,
+            light_4: false
         };
 
         for (const config of LIGHTS) {
@@ -274,6 +320,11 @@ export class LightManager extends EventEmitter {
                 });
             }
         }
+
+        // Set the light_N boolean flags
+        status.lights.forEach((light, index) => {
+            status[`light_${index + 1}`] = light.connected;
+        });
 
         return status;
     }

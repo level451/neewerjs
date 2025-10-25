@@ -20,9 +20,10 @@ export class WebSocketServer {
             console.log(`\n🔌 WebSocket client connected (Total: ${this.wss.clients.size})`);
             this.clients.add(ws);
 
-            // Send current status immediately
+            // Send current status immediately on connection
             const status = this.lightManager.getStatus();
             ws.send(JSON.stringify(status));
+            console.log(`📤 Sent initial status to new client`);
 
             // Handle incoming messages
             ws.on('message', async (data) => {
