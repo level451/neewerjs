@@ -11,7 +11,7 @@ export class LightManager extends EventEmitter {
         super();
         this.lights = new Map(); // mac -> NeewerLight
         this.scanner = new LightScanner();
-        this.reconnectInterval = 2000; // Try to reconnect every 2 seconds
+        this.reconnectInterval = 10000; // Try to reconnect every 10 seconds
         this.reconnectTimers = new Map();
         this.pollInterval = 5000; // Poll lights every 5 seconds
         this.pollTimer = null;
@@ -77,15 +77,30 @@ export class LightManager extends EventEmitter {
             } else {
                 console.log(`⚠ ${config.name} (${config.mac}) not found - will keep trying to connect`);
 
-                // Create a light entry even if not discovered, so we can retry
-                const light = new NeewerLight({
-                    id: config.mac,
-                    address: config.mac,
-                    advertisement: { localName: config.name },
-                    rssi: 0
+                // Create a placeholder light entry for missing lights
+                // We'll get the real peripheral during rescan
+                const placeholderLight = {
+                    name: config.name,
+                    mac: config.mac.toLowerCase(),
+                    connected: false,
+                    state: {
+                        brightness: 0,
+                        cct: 5600
+                    }
+                };
+
+                // Store just enough info to retry later
+                this.lights.set(config.mac.toLowerCase(), {
+                    name: config.name,
+                    peripheral: null, // No peripheral yet
+                    connected: false,
+                    rssi: 0,
+                    state: {
+                        brightness: 0,
+                        cct: 5600
+                    },
+                    toJSON: () => placeholderLight
                 });
-                light.name = config.name;
-                this.lights.set(config.mac.toLowerCase(), light);
 
                 // Schedule reconnect attempts for missing lights
                 this.scheduleReconnect(config.mac.toLowerCase());
@@ -217,8 +232,33 @@ export class LightManager extends EventEmitter {
                             l.address.toLowerCase() === mac.toLowerCase()
                         );
                         if (found) {
-                            light.peripheral = found.peripheral;
-                            console.log(`  Found ${light.name}, connecting...`);
+                            // Replace placeholder with real NeewerLight
+                            const realLight = new NeewerLight(found.peripheral);
+                            realLight.name = light.name;
+                            this.lights.set(mac, realLight);
+
+                            // Set up handlers
+                            realLight.peripheral.removeAllListeners('disconnect');
+                            realLight.peripheral.once('disconnect', () => {
+                                console.log(`${realLight.name} disconnected!`);
+                                realLight.connected = false;
+                                realLight.state.brightness = 0;
+                                realLight.state.cct = 5600;
+                                this.emitStatus();
+                                this.scheduleReconnect(mac);
+                            });
+
+                            realLight.on('stateChanged', (state) => {
+                                this.emitStatus();
+                            });
+
+                            realLight.on('disconnected', () => {
+                                realLight.connected = false;
+                                this.emitStatus();
+                                this.scheduleReconnect(mac);
+                            });
+
+                            console.log(`  Found ${realLight.name}, connecting...`);
                         } else {
                             console.log(`  ${light.name} not found in scan`);
                             this.scheduleReconnect(mac); // Try again
