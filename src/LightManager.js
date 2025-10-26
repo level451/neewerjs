@@ -43,12 +43,15 @@ export class LightManager extends EventEmitter {
                 // Set up disconnect handler (only once!)
                 light.peripheral.removeAllListeners('disconnect');
                 light.peripheral.once('disconnect', () => {
-                    console.log(`${light.name} disconnected!`);
+                    console.log(`\n❌ ${light.name} disconnected!`);
                     light.connected = false;
                     // Reset state to unknown when disconnected
                     light.state.brightness = 0;
                     light.state.cct = 5600;
                     this.emitStatus(); // Send status on disconnect
+
+                    // Important: Schedule reconnect
+                    console.log(`   Scheduling reconnect for ${light.name}...`);
                     this.scheduleReconnect(config.mac.toLowerCase());
                 });
 
@@ -125,11 +128,12 @@ export class LightManager extends EventEmitter {
 
         this.pollTimer = setInterval(async () => {
             for (const [mac, light] of this.lights) {
-                if (light.connected) {
+                // Only poll if connected AND has a real peripheral
+                if (light.connected && light.peripheral && light.readStatus) {
                     try {
                         await light.readStatus();
                     } catch (error) {
-                        console.error(`Failed to read status from ${light.name}:`, error.message);
+                        // Don't log - readStatus handles errors internally
                     }
                 }
             }

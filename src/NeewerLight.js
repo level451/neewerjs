@@ -169,12 +169,10 @@ export class NeewerLight extends EventEmitter {
             // Connection is alive if we got here
 
         } catch (error) {
-            // Connection might be dead
-            if (error.message.includes('disconnected') || error.message.includes('not connected')) {
-                console.log(`${this.name} connection lost during status check`);
-                this.connected = false;
-                this.emit('disconnected');
-            }
+            // Connection is dead - mark as disconnected and emit event
+            console.log(`⚠ ${this.name} connection dead during poll: ${error.message}`);
+            this.connected = false;
+            this.emit('disconnected');
         }
     }
 
