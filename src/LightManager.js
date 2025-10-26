@@ -240,7 +240,7 @@ export class LightManager extends EventEmitter {
                 if (!light.peripheral || !light.peripheral.address) {
                     console.log(`  Rescanning for ${light.name}...`);
                     try {
-                        const discovered = await this.scanner.scan(3000, false, 1);
+                        const discovered = await this.scanner.scan(5000, false); // Scan for 5 sec, no target count
                         const found = discovered.find(l =>
                             l.address.toLowerCase() === mac.toLowerCase()
                         );
@@ -291,7 +291,6 @@ export class LightManager extends EventEmitter {
         }, this.reconnectInterval);
 
         this.reconnectTimers.set(mac, timer);
-        console.log(`   Timer set with ID:`, timer);
     }
 
     /**
