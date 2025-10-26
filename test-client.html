@@ -264,31 +264,41 @@
           </div>
           <div class="mac-address">${light.mac}</div>
           <div class="control-group">
-            <label>Brightness: <span id="bright-${index}">${light.brightness}</span>%</label>
-            <input type="range" min="0" max="100" value="${light.brightness}"
-                   onchange="setLight('${light.mac}', this.value, document.getElementById('temp-slider-${index}').value)"
+            <label>Brightness: <span id="bright-value-${index}">${light.brightness}</span>%</label>
+            <input type="range" id="bright-slider-${index}" min="0" max="100" value="${light.brightness}"
                    ${!light.connected ? 'disabled' : ''}>
           </div>
           <div class="control-group">
-            <label>Temperature: <span id="temp-${index}">${light.temperature}</span>K</label>
+            <label>Temperature: <span id="temp-value-${index}">${light.temperature}</span>K</label>
             <input type="range" id="temp-slider-${index}" min="3200" max="8500" value="${light.temperature}" step="100"
-                   onchange="setLight('${light.mac}', document.getElementById('bright-${index}').parentElement.querySelector('input').value, this.value)"
                    ${!light.connected ? 'disabled' : ''}>
           </div>
         `;
             grid.appendChild(card);
 
-            // Update value displays on slider input
-            const brightSlider = card.querySelector('input[type="range"]');
-            const tempSlider = card.querySelector('#temp-slider-' + index);
+            // Add event listeners after adding to DOM
+            const brightSlider = document.getElementById(`bright-slider-${index}`);
+            const tempSlider = document.getElementById(`temp-slider-${index}`);
+            const brightValue = document.getElementById(`bright-value-${index}`);
+            const tempValue = document.getElementById(`temp-value-${index}`);
 
-            brightSlider.addEventListener('input', (e) => {
-                document.getElementById(`bright-${index}`).textContent = e.target.value;
-            });
+            if (brightSlider && tempSlider) {
+                brightSlider.addEventListener('input', (e) => {
+                    brightValue.textContent = e.target.value;
+                });
 
-            tempSlider.addEventListener('input', (e) => {
-                document.getElementById(`temp-${index}`).textContent = e.target.value;
-            });
+                brightSlider.addEventListener('change', (e) => {
+                    setLight(light.mac, e.target.value, tempSlider.value);
+                });
+
+                tempSlider.addEventListener('input', (e) => {
+                    tempValue.textContent = e.target.value;
+                });
+
+                tempSlider.addEventListener('change', (e) => {
+                    setLight(light.mac, brightSlider.value, e.target.value);
+                });
+            }
         });
 
         // Update timestamp
