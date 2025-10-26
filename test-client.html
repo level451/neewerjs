@@ -198,7 +198,7 @@
         </div>
         <div class="control-group">
             <label>All Lights - Temperature: <span id="globalTemp">5600</span>K</label>
-            <input type="range" id="globalTempSlider" min="3200" max="8500" value="5600" step="100">
+            <input type="range" id="globalTempSlider" min="2700" max="6500" value="5600" step="100">
         </div>
         <button onclick="setAllLights()">Apply to All Lights</button>
         <button onclick="turnAllOff()">Turn All Off</button>
@@ -270,7 +270,7 @@
           </div>
           <div class="control-group">
             <label>Temperature: <span id="temp-value-${index}">${light.temperature}</span>K</label>
-            <input type="range" id="temp-slider-${index}" min="3200" max="8500" value="${light.temperature}" step="100"
+            <input type="range" id="temp-slider-${index}" min="2700" max="6500" value="${light.temperature}" step="100"
                    ${!light.connected ? 'disabled' : ''}>
           </div>
         `;
