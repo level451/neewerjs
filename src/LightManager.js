@@ -126,16 +126,25 @@ export class LightManager extends EventEmitter {
     startPolling() {
         console.log(`\n🔄 Starting status polling every ${this.pollInterval/1000} seconds`);
 
+        let pollCount = 0;
         this.pollTimer = setInterval(async () => {
+            pollCount++;
+            const results = [];
+
             for (const [mac, light] of this.lights) {
                 // Only poll if connected AND has a real peripheral
                 if (light.connected && light.peripheral && light.readStatus) {
                     try {
                         await light.readStatus();
+                        results.push(`${light.name}:✓`);
                     } catch (error) {
-                        // Don't log - readStatus handles errors internally
+                        results.push(`${light.name}:✗`);
                     }
                 }
+            }
+
+            if (results.length > 0) {
+                console.log(`💓 Poll #${pollCount}: ${results.join(' | ')}`);
             }
         }, this.pollInterval);
     }
@@ -276,10 +285,13 @@ export class LightManager extends EventEmitter {
                 }
 
                 await this.connectLight(mac);
+            } else {
+                console.log(`   ${light?.name || mac} already connected or missing, skipping`);
             }
         }, this.reconnectInterval);
 
         this.reconnectTimers.set(mac, timer);
+        console.log(`   Timer set with ID:`, timer);
     }
 
     /**
