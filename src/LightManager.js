@@ -24,8 +24,8 @@ export class LightManager extends EventEmitter {
         console.log('Initializing Light Manager...');
         console.log(`Looking for ${LIGHTS.length} configured lights...\n`);
 
-        // Scan for lights - stop as soon as we find all 4, max 5 seconds
-        const discoveredLights = await this.scanner.scan(5000, false, LIGHTS.length);
+        // Scan for lights - stop as soon as we find all 4, max 10 seconds
+        const discoveredLights = await this.scanner.scan(10000, false, LIGHTS.length);
 
         // Find and connect to our configured lights
         const connectionPromises = [];
@@ -184,10 +184,10 @@ export class LightManager extends EventEmitter {
         }
 
         try {
-            // Add overall timeout for connection attempt (shorter for reconnects)
+            // Add overall timeout for connection attempt (25 seconds)
             const connectPromise = light.connect();
             const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Connection attempt timeout')), 15000)
+                setTimeout(() => reject(new Error('Connection attempt timeout')), 25000)
             );
 
             await Promise.race([connectPromise, timeoutPromise]);
@@ -240,7 +240,7 @@ export class LightManager extends EventEmitter {
                 if (!light.peripheral || !light.peripheral.address) {
                     console.log(`  Rescanning for ${light.name}...`);
                     try {
-                        const discovered = await this.scanner.scan(5000, false); // Scan for 5 sec, no target count
+                        const discovered = await this.scanner.scan(10000, false); // Scan for 10 sec
                         const found = discovered.find(l =>
                             l.address.toLowerCase() === mac.toLowerCase()
                         );
