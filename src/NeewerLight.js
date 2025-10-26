@@ -39,7 +39,7 @@ export class NeewerLight extends EventEmitter {
     /**
      * Connect to the light
      */
-    async connect(timeout = 10000, retries = 2) {
+    async connect(timeout = 15000, retries = 2) {
         if (this.connected) {
             console.log(`Light ${this.name} is already connected`);
             return;
@@ -85,9 +85,11 @@ export class NeewerLight extends EventEmitter {
                         this.characteristic = chars.find(c => c.uuid === writeCharUuid);
                         this.notifyCharacteristic = chars.find(c => c.uuid === notifyCharUuid);
 
-                        if (this.characteristic) {
-                            console.log(`  ✓ Found write characteristic`);
+                        if (!this.characteristic) {
+                            throw new Error('Could not find write characteristic');
                         }
+
+                        console.log(`  ✓ Found write characteristic`);
 
                         if (this.notifyCharacteristic) {
                             console.log(`  ✓ Found notify characteristic`);
@@ -104,14 +106,13 @@ export class NeewerLight extends EventEmitter {
                             }
                         }
 
-                        if (!this.characteristic) {
-                            throw new Error('Could not find write characteristic');
-                        }
-
                         this.connected = true;
                         console.log(`✓ Successfully connected to ${this.name}`);
-                        return;
+                        return; // Success - exit here
                     }
+
+                    throw new Error('Service not found');
+
                 } catch (directError) {
                     console.log(`  Direct access failed: ${directError.message}, trying full discovery...`);
                 }
@@ -119,7 +120,7 @@ export class NeewerLight extends EventEmitter {
                 // Fallback: Full discovery if direct access failed
                 const discoverPromise = this.peripheral.discoverAllServicesAndCharacteristicsAsync();
                 const discoverTimeout = new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('Service discovery timeout')), 8000)
+                    setTimeout(() => reject(new Error('Service discovery timeout')), 12000)
                 );
 
                 const { services, characteristics } = await Promise.race([discoverPromise, discoverTimeout]);
