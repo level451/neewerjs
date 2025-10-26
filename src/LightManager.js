@@ -1,423 +1,278 @@
-// Light Manager - Manages all lights with auto-reconnect
-
+// NeewerLight class - represents a single Neewer light
 import { EventEmitter } from 'events';
-import { LightScanner } from './LightScanner.js';
-import { NeewerLight } from './NeewerLight.js';
-import { CommandBuilder } from './CommandBuilder.js';
-import { LIGHTS } from './lightConfig.js';
+import { GATT_CHARACTERISTIC_UUID, LIGHT_TYPES } from './constants.js';
 
-export class LightManager extends EventEmitter {
-    constructor() {
+export class NeewerLight extends EventEmitter {
+    constructor(peripheral) {
         super();
-        this.lights = new Map(); // mac -> NeewerLight
-        this.scanner = new LightScanner();
-        this.reconnectInterval = 10000; // Try to reconnect every 10 seconds
-        this.reconnectTimers = new Map();
-        this.pollInterval = 5000; // Poll lights every 5 seconds
-        this.pollTimer = null;
+        this.peripheral = peripheral;
+        this.peripheral.setMaxListeners(20); // Prevent memory leak warning
+        this.id = peripheral.id;
+        this.id = peripheral.id;
+        this.address = peripheral.address;
+        this.name = peripheral.advertisement.localName || 'Unknown Neewer Light';
+        this.rssi = peripheral.rssi;
+        this.connected = false;
+        this.characteristic = null;
+        this.notifyCharacteristic = null; // Store for polling
+
+        // Light capabilities (will be determined on connection)
+        this.capabilities = {
+            supportsCCT: true,
+            supportsRGB: false,
+            supportsScenes: false,
+            cctRange: { min: 3200, max: 5600 }
+        };
+
+        // Current state
+        this.state = {
+            isOn: false,
+            mode: null,
+            brightness: 0,
+            cct: 5600,
+            hue: 0,
+            saturation: 100,
+            scene: null
+        };
     }
 
     /**
-     * Initialize - scan and connect to all configured lights
+     * Connect to the light
      */
-    async initialize() {
-        console.log('Initializing Light Manager...');
-        console.log(`Looking for ${LIGHTS.length} configured lights...\n`);
-
-        // Scan for lights - stop as soon as we find all 4, max 5 seconds
-        const discoveredLights = await this.scanner.scan(5000, false, LIGHTS.length);
-
-        // Find and connect to our configured lights
-        const connectionPromises = [];
-
-        for (const config of LIGHTS) {
-            const discovered = discoveredLights.find(l =>
-                l.address.toLowerCase() === config.mac.toLowerCase()
-            );
-
-            if (discovered) {
-                const light = new NeewerLight(discovered.peripheral);
-                light.name = config.name;
-                this.lights.set(config.mac.toLowerCase(), light);
-
-                // Set up disconnect handler (only once!)
-                light.peripheral.removeAllListeners('disconnect');
-                light.peripheral.once('disconnect', () => {
-                    console.log(`\n❌ ${light.name} disconnected!`);
-                    light.connected = false;
-                    // Reset state to unknown when disconnected
-                    light.state.brightness = 0;
-                    light.state.cct = 5600;
-                    this.emitStatus(); // Send status on disconnect
-
-                    // Important: Schedule reconnect
-                    console.log(`   Scheduling reconnect for ${light.name}...`);
-                    this.scheduleReconnect(config.mac.toLowerCase());
-                });
-
-                // Listen for state changes from the light
-                light.on('stateChanged', (state) => {
-                    console.log(`📢 ${light.name} changed via physical controls`);
-                    this.emitStatus();
-                });
-
-                // Listen for disconnection detected during polling
-                light.on('disconnected', () => {
-                    console.log(`${light.name} connection lost during operation`);
-                    light.connected = false;
-                    this.emitStatus(); // Send status on disconnect
-                    this.scheduleReconnect(config.mac.toLowerCase());
-                });
-
-                // Try to connect (don't await, do in parallel)
-                connectionPromises.push(
-                    this.connectLight(config.mac.toLowerCase()).catch(err => {
-                        console.error(`${light.name} initial connect failed:`, err.message);
-                        // Schedule reconnect even if initial connection fails
-                        this.scheduleReconnect(config.mac.toLowerCase());
-                    })
-                );
-            } else {
-                console.log(`⚠ ${config.name} (${config.mac}) not found - will keep trying to connect`);
-
-                // Create a placeholder light entry for missing lights
-                // We'll get the real peripheral during rescan
-                const placeholderLight = {
-                    name: config.name,
-                    mac: config.mac.toLowerCase(),
-                    connected: false,
-                    state: {
-                        brightness: 0,
-                        cct: 5600
-                    }
-                };
-
-                // Store just enough info to retry later
-                this.lights.set(config.mac.toLowerCase(), {
-                    name: config.name,
-                    peripheral: null, // No peripheral yet
-                    connected: false,
-                    rssi: 0,
-                    state: {
-                        brightness: 0,
-                        cct: 5600
-                    },
-                    toJSON: () => placeholderLight
-                });
-
-                // Schedule reconnect attempts for missing lights
-                this.scheduleReconnect(config.mac.toLowerCase());
-            }
+    async connect(timeout = 10000, retries = 2) {
+        if (this.connected) {
+            console.log(`Light ${this.name} is already connected`);
+            return;
         }
 
-        // Wait for all connection attempts to complete (or fail)
-        await Promise.allSettled(connectionPromises);
+        let lastError = null;
 
-        console.log('\n=== Initialization Complete ===');
-        this.emitStatus();
+        for (let attempt = 1; attempt <= retries; attempt++) {
+            try {
+                if (attempt > 1) {
+                    console.log(`Retry attempt ${attempt}/${retries}...`);
+                    // Wait a bit between retries
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                }
 
-        // Start polling lights
-        this.startPolling();
-    }
+                console.log(`Connecting to ${this.name}...`);
 
-    /**
-     * Start polling all lights for status
-     */
-    startPolling() {
-        console.log(`\n🔄 Starting status polling every ${this.pollInterval/1000} seconds`);
+                // Add timeout to connection
+                const connectPromise = this.peripheral.connectAsync();
+                const timeoutPromise = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Connection timeout')), timeout)
+                );
 
-        let pollCount = 0;
-        this.pollTimer = setInterval(async () => {
-            pollCount++;
-            const results = [];
+                await Promise.race([connectPromise, timeoutPromise]);
+                console.log(`Connected! Discovering services...`);
 
-            for (const [mac, light] of this.lights) {
-                // Only poll if connected AND has a real peripheral
-                if (light.connected && light.peripheral && light.readStatus) {
-                    try {
-                        await light.readStatus();
-                        results.push(`${light.name}:✓`);
-                    } catch (error) {
-                        results.push(`${light.name}:✗`);
+                // Try to discover services with timeout (reduced for faster failure)
+                const discoverPromise = this.peripheral.discoverAllServicesAndCharacteristicsAsync();
+                const discoverTimeout = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Service discovery timeout')), 8000)
+                );
+
+                const { services, characteristics } = await Promise.race([discoverPromise, discoverTimeout]);
+
+                console.log(`Found ${services.length} service(s) and ${characteristics.length} characteristic(s)`);
+
+                // Find write characteristic
+                this.characteristic = characteristics.find(
+                    c => c.uuid === GATT_CHARACTERISTIC_UUID
+                );
+
+                if (!this.characteristic) {
+                    console.warn(`Could not find expected characteristic ${GATT_CHARACTERISTIC_UUID}`);
+                    console.warn('Trying alternate characteristic search...');
+
+                    this.characteristic = characteristics.find(
+                        c => c.properties.includes('write') || c.properties.includes('writeWithoutResponse')
+                    );
+
+                    if (this.characteristic) {
+                        console.log(`Using alternate characteristic: ${this.characteristic.uuid}`);
+                    } else {
+                        throw new Error('Could not find any writable characteristic');
                     }
                 }
-            }
 
-            if (results.length > 0) {
-                console.log(`💓 Poll #${pollCount}: ${results.join(' | ')}`);
+                // Find notify characteristic for reading state changes
+                const notifyChar = characteristics.find(
+                    c => c.uuid === '69400003b5a3f393e0a9e50e24dcca99' && c.properties.includes('notify')
+                );
+
+                if (notifyChar) {
+                    console.log(`  Found notify characteristic: ${notifyChar.uuid}`);
+                    this.notifyCharacteristic = notifyChar; // Store for polling
+
+                    try {
+                        await notifyChar.subscribeAsync();
+                        console.log(`✓ Subscribed to notifications from ${this.name}`);
+
+                        notifyChar.on('data', (data) => {
+                            // Ignore empty or single-byte keepalive messages
+                            if (data.length < 5) {
+                                return;
+                            }
+                            console.log(`📩 ${this.name} notification data:`, Array.from(data).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
+                            this.parseNotification(data);
+                        });
+                    } catch (err) {
+                        console.log(`  ⚠ Could not subscribe to notifications: ${err.message}`);
+                    }
+                } else {
+                    console.log(`  ⚠ No notify characteristic found`);
+                }
+
+                this.connected = true;
+                console.log(`✓ Successfully connected to ${this.name}`);
+                console.log(`  Using characteristic: ${this.characteristic.uuid}`);
+                return; // Success!
+
+            } catch (error) {
+                lastError = error;
+                console.error(`Attempt ${attempt} failed:`, error.message);
+
+                // Try to disconnect if partially connected
+                try {
+                    await this.peripheral.disconnectAsync();
+                } catch (e) {
+                    // Ignore disconnect errors
+                }
+
+                // If this wasn't the last attempt, continue to retry
+                if (attempt < retries) {
+                    continue;
+                }
             }
-        }, this.pollInterval);
+        }
+
+        // All retries failed
+        throw new Error(`Failed to connect after ${retries} attempts: ${lastError.message}`);
     }
 
     /**
-     * Stop polling
+     * Read current status from the light
      */
-    stopPolling() {
-        if (this.pollTimer) {
-            clearInterval(this.pollTimer);
-            this.pollTimer = null;
-        }
-    }
-
-    /**
-     * Connect to a specific light
-     */
-    async connectLight(mac) {
-        const light = this.lights.get(mac.toLowerCase());
-        if (!light) return false;
-
-        // Don't try to connect if already connected
-        if (light.connected) {
-            console.log(`${light.name} is already connected, skipping`);
-            return true;
-        }
-
-        // Don't try to connect if peripheral says it's connected
-        if (light.peripheral.state === 'connected') {
-            console.log(`${light.name} peripheral already connected, cleaning up...`);
-            try {
-                await light.peripheral.disconnectAsync();
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            } catch (e) {
-                // Ignore
-            }
+    async readStatus() {
+        if (!this.connected || !this.characteristic) {
+            return;
         }
 
         try {
-            // Add overall timeout for connection attempt
-            const connectPromise = light.connect();
-            const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Connection attempt timeout')), 20000)
-            );
-
-            await Promise.race([connectPromise, timeoutPromise]);
-
-            console.log(`✓ ${light.name} connected successfully`);
-            this.emitStatus(); // Send status on successful connect
-
-            // Cancel any reconnect timer
-            if (this.reconnectTimers.has(mac)) {
-                clearTimeout(this.reconnectTimers.get(mac));
-                this.reconnectTimers.delete(mac);
+            // Just verify connection is alive by reading a characteristic
+            // Don't send any commands that would change the light state
+            if (this.notifyCharacteristic) {
+                // Try to read the notify characteristic (non-destructive)
+                await this.notifyCharacteristic.readAsync();
             }
+            // Connection is alive if we got here
 
-            return true;
         } catch (error) {
-            console.error(`Failed to connect to ${light.name}:`, error.message);
-            light.connected = false;
-
-            // Force disconnect to clean up
-            try {
-                await light.peripheral.disconnectAsync();
-            } catch (e) {
-                // Ignore
-            }
-
-            this.emitStatus();
-            this.scheduleReconnect(mac);
-            return false;
+            // Connection is dead - mark as disconnected and emit event
+            console.log(`⚠ ${this.name} connection dead during poll: ${error.message}`);
+            this.connected = false;
+            this.emit('disconnected');
         }
     }
 
     /**
-     * Schedule reconnection attempt
+     * Parse notification data from light (when values change)
      */
-    scheduleReconnect(mac) {
-        if (this.reconnectTimers.has(mac)) {
-            return; // Already scheduled
+    parseNotification(data) {
+        // Ignore short messages
+        if (data.length < 5) {
+            return;
         }
 
-        const light = this.lights.get(mac);
-        console.log(`⏰ Will retry ${light?.name || mac} in ${this.reconnectInterval/1000} seconds`);
+        console.log(`🔍 Parsing notification from ${this.name}, length: ${data.length}`);
 
-        const timer = setTimeout(async () => {
-            this.reconnectTimers.delete(mac); // Remove timer reference
-            const light = this.lights.get(mac);
-            if (light && !light.connected) {
-                console.log(`\n🔄 Reconnecting to ${light.name}...`);
+        // Neewer lights send status updates as notifications
+        // Format: [0x78, 0x87, 0x02, brightness, temp, checksum] for CCT mode
 
-                // If we don't have a peripheral, rescan for it
-                if (!light.peripheral || !light.peripheral.address) {
-                    console.log(`  Rescanning for ${light.name}...`);
-                    try {
-                        const discovered = await this.scanner.scan(5000, false); // Scan for 5 sec, no target count
-                        const found = discovered.find(l =>
-                            l.address.toLowerCase() === mac.toLowerCase()
-                        );
-                        if (found) {
-                            // Replace placeholder with real NeewerLight
-                            const realLight = new NeewerLight(found.peripheral);
-                            realLight.name = light.name;
-                            this.lights.set(mac, realLight);
+        if (data[0] === 0x78 && data[1] === 0x87) {
+            console.log(`  CCT mode notification detected`);
+            const brightness = data[3];
+            const tempByte = data[4];
 
-                            // Set up handlers
-                            realLight.peripheral.removeAllListeners('disconnect');
-                            realLight.peripheral.once('disconnect', () => {
-                                console.log(`${realLight.name} disconnected!`);
-                                realLight.connected = false;
-                                realLight.state.brightness = 0;
-                                realLight.state.cct = 5600;
-                                this.emitStatus();
-                                this.scheduleReconnect(mac);
-                            });
+            // Convert temp byte back to Kelvin
+            const temperature = Math.round((tempByte - 32) / 53 * 6300 + 3200);
 
-                            realLight.on('stateChanged', (state) => {
-                                this.emitStatus();
-                            });
+            console.log(`  Parsed: brightness=${brightness}%, temp=${temperature}K`);
+            console.log(`  Current state: brightness=${this.state.brightness}%, temp=${this.state.cct}K`);
 
-                            realLight.on('disconnected', () => {
-                                realLight.connected = false;
-                                this.emitStatus();
-                                this.scheduleReconnect(mac);
-                            });
+            const changed = (this.state.brightness !== brightness || this.state.cct !== temperature);
 
-                            console.log(`  Found ${realLight.name}, connecting...`);
-                        } else {
-                            console.log(`  ${light.name} not found in scan`);
-                            this.scheduleReconnect(mac); // Try again
-                            return;
-                        }
-                    } catch (err) {
-                        console.log(`  Scan failed: ${err.message}`);
-                        this.scheduleReconnect(mac); // Try again
-                        return;
-                    }
-                }
+            this.state.brightness = brightness;
+            this.state.cct = temperature;
 
-                await this.connectLight(mac);
+            if (changed) {
+                console.log(`📢 ${this.name} state changed: ${brightness}% @ ${temperature}K`);
+                this.emit('stateChanged', { brightness, temperature });
             } else {
-                console.log(`   ${light?.name || mac} already connected or missing, skipping`);
+                console.log(`  No change detected`);
             }
-        }, this.reconnectInterval);
-
-        this.reconnectTimers.set(mac, timer);
-    }
-
-    /**
-     * Set CCT for one or all lights
-     * @param {string|null} mac - Specific light MAC or null for all
-     * @param {number} brightness - 0-100
-     * @param {number} temperature - 3200-8500K
-     */
-    async setCCT(mac, brightness, temperature) {
-        const command = CommandBuilder.setCCT(brightness, temperature);
-
-        if (mac === null || mac === 'all') {
-            // Send to all connected lights
-            const results = [];
-            for (const [lightMac, light] of this.lights) {
-                if (light.connected) {
-                    try {
-                        await light.sendCommand(command);
-                        light.state.brightness = brightness;
-                        light.state.cct = temperature;
-                        results.push({ mac: lightMac, success: true });
-                    } catch (error) {
-                        results.push({ mac: lightMac, success: false, error: error.message });
-                    }
-                } else {
-                    results.push({ mac: lightMac, success: false, error: 'Not connected' });
-                }
-            }
-            this.emitStatus();
-            return results;
         } else {
-            // Send to specific light
-            const light = this.lights.get(mac.toLowerCase());
-            if (!light) {
-                throw new Error(`Light ${mac} not found`);
-            }
-            if (!light.connected) {
-                throw new Error(`Light ${light.name} is not connected`);
-            }
-
-            await light.sendCommand(command);
-            light.state.brightness = brightness;
-            light.state.cct = temperature;
-            this.emitStatus();
-            return { mac, success: true };
+            console.log(`  Unknown notification format (0x${data[0].toString(16)} 0x${data[1].toString(16)})`);
         }
     }
 
     /**
-     * Get status of all lights
+     * Disconnect from the light
      */
-    getStatus() {
-        const status = {
-            timestamp: new Date().toISOString(),
-            lights: [],
-            light_1: false,
-            light_2: false,
-            light_3: false,
-            light_4: false
+    async disconnect() {
+        if (!this.connected) {
+            return;
+        }
+
+        try {
+            await this.peripheral.disconnectAsync();
+            this.connected = false;
+            this.characteristic = null;
+            console.log(`Disconnected from ${this.name}`);
+        } catch (error) {
+            console.error(`Failed to disconnect from ${this.name}:`, error.message);
+        }
+    }
+
+    /**
+     * Send a command to the light
+     */
+    async sendCommand(commandBytes) {
+        if (!this.connected || !this.characteristic) {
+            throw new Error('Light is not connected');
+        }
+
+        try {
+            const buffer = Buffer.from(commandBytes);
+            await this.characteristic.writeAsync(buffer, false);
+        } catch (error) {
+            console.error(`Failed to send command to ${this.name}:`, error.message);
+            throw error;
+        }
+    }
+
+    /**
+     * Get light info as a formatted string
+     */
+    toString() {
+        return `${this.name} (${this.address}) - RSSI: ${this.rssi} dBm - ${
+            this.connected ? 'Connected' : 'Disconnected'
+        }`;
+    }
+
+    /**
+     * Get light info as object
+     */
+    toJSON() {
+        return {
+            id: this.id,
+            address: this.address,
+            name: this.name,
+            rssi: this.rssi,
+            connected: this.connected,
+            capabilities: this.capabilities,
+            state: this.state
         };
-
-        for (const config of LIGHTS) {
-            const light = this.lights.get(config.mac.toLowerCase());
-
-            if (light) {
-                status.lights.push({
-                    name: light.name,
-                    mac: config.mac,
-                    connected: light.connected,
-                    brightness: light.state.brightness,
-                    temperature: light.state.cct,
-                    rssi: light.rssi
-                });
-            } else {
-                status.lights.push({
-                    name: config.name,
-                    mac: config.mac,
-                    connected: false,
-                    brightness: 0,
-                    temperature: 0,
-                    rssi: null
-                });
-            }
-        }
-
-        // Set the light_N boolean flags
-        status.lights.forEach((light, index) => {
-            status[`light_${index + 1}`] = light.connected;
-        });
-
-        return status;
-    }
-
-    /**
-     * Emit status update
-     */
-    emitStatus() {
-        const status = this.getStatus();
-        this.emit('status', status);
-
-        // Compact one-line summary
-        const summary = status.lights.map(l =>
-            `${l.name}: ${l.connected ? '🟢' : '🔴'} ${l.brightness}%@${l.temperature}K`
-        ).join(' | ');
-        console.log(`📊 ${summary}`);
-    }
-
-    /**
-     * Shutdown - disconnect all lights
-     */
-    async shutdown() {
-        console.log('\nShutting down Light Manager...');
-
-        // Stop polling
-        this.stopPolling();
-
-        // Clear all reconnect timers
-        for (const timer of this.reconnectTimers.values()) {
-            clearTimeout(timer);
-        }
-        this.reconnectTimers.clear();
-
-        // Disconnect all lights
-        for (const light of this.lights.values()) {
-            if (light.connected) {
-                await light.disconnect();
-            }
-        }
     }
 }
