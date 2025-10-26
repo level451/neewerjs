@@ -39,7 +39,7 @@ export class NeewerLight extends EventEmitter {
     /**
      * Connect to the light
      */
-    async connect(timeout = 12000, retries = 2) {
+    async connect(timeout = 10000, retries = 2) {
         if (this.connected) {
             console.log(`Light ${this.name} is already connected`);
             return;
@@ -64,12 +64,62 @@ export class NeewerLight extends EventEmitter {
                 );
 
                 await Promise.race([connectPromise, timeoutPromise]);
-                console.log(`Connected! Discovering services...`);
+                console.log(`Connected! Getting characteristics...`);
 
-                // Try to discover services with timeout
+                // Try direct characteristic access first (faster, less likely to fail)
+                try {
+                    const serviceUuid = '69400001b5a3f393e0a9e50e24dcca99';
+                    const writeCharUuid = '69400002b5a3f393e0a9e50e24dcca99';
+                    const notifyCharUuid = '69400003b5a3f393e0a9e50e24dcca99';
+
+                    // Discover only the specific service we need
+                    const services = await this.peripheral.discoverServicesAsync([serviceUuid]);
+
+                    if (services.length > 0) {
+                        const service = services[0];
+                        console.log(`  Found Neewer service`);
+
+                        // Discover only the characteristics we need
+                        const chars = await service.discoverCharacteristicsAsync([writeCharUuid, notifyCharUuid]);
+
+                        this.characteristic = chars.find(c => c.uuid === writeCharUuid);
+                        this.notifyCharacteristic = chars.find(c => c.uuid === notifyCharUuid);
+
+                        if (this.characteristic) {
+                            console.log(`  ✓ Found write characteristic`);
+                        }
+
+                        if (this.notifyCharacteristic) {
+                            console.log(`  ✓ Found notify characteristic`);
+                            try {
+                                await this.notifyCharacteristic.subscribeAsync();
+                                console.log(`  ✓ Subscribed to notifications`);
+
+                                this.notifyCharacteristic.on('data', (data) => {
+                                    if (data.length < 5) return;
+                                    this.parseNotification(data);
+                                });
+                            } catch (err) {
+                                console.log(`  ⚠ Could not subscribe: ${err.message}`);
+                            }
+                        }
+
+                        if (!this.characteristic) {
+                            throw new Error('Could not find write characteristic');
+                        }
+
+                        this.connected = true;
+                        console.log(`✓ Successfully connected to ${this.name}`);
+                        return;
+                    }
+                } catch (directError) {
+                    console.log(`  Direct access failed: ${directError.message}, trying full discovery...`);
+                }
+
+                // Fallback: Full discovery if direct access failed
                 const discoverPromise = this.peripheral.discoverAllServicesAndCharacteristicsAsync();
                 const discoverTimeout = new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('Service discovery timeout')), 10000)
+                    setTimeout(() => reject(new Error('Service discovery timeout')), 8000)
                 );
 
                 const { services, characteristics } = await Promise.race([discoverPromise, discoverTimeout]);
