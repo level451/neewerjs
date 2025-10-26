@@ -12,6 +12,7 @@ export const LIGHTS = [
     {
         name: "Light 3",
         mac: "ca:d5:38:66:dc:4f",
+        fixedTemp: 5600, // This light only does 5600K
     },
     {
         name: "Light 4",

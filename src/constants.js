@@ -35,8 +35,8 @@ export const LIGHT_TYPES = {
 };
 
 // CCT Temperature range (in Kelvin)
-export const CCT_MIN = 3200;
-export const CCT_MAX = 8500;
+export const CCT_MIN = 2700;
+export const CCT_MAX = 6500;
 export const CCT_DEFAULT = 5600;
 
 // RGB/HSI ranges
