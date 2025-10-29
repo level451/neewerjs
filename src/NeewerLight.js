@@ -73,7 +73,12 @@ export class NeewerLight extends EventEmitter {
 
                 try {
                     // Get the service (quick)
-                    const services = await this.peripheral.discoverServicesAsync([serviceUuid]);
+                    const servicePromise = this.peripheral.discoverServicesAsync([serviceUuid]);
+                    const serviceTimeout = new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('Service discovery timeout')), 5000)
+                    );
+
+                    const services = await Promise.race([servicePromise, serviceTimeout]);
 
                     if (services.length === 0) {
                         throw new Error('Neewer service not found');
@@ -82,7 +87,12 @@ export class NeewerLight extends EventEmitter {
                     const service = services[0];
 
                     // Get only the two characteristics we need (quick)
-                    const chars = await service.discoverCharacteristicsAsync([writeCharUuid, notifyCharUuid]);
+                    const charPromise = service.discoverCharacteristicsAsync([writeCharUuid, notifyCharUuid]);
+                    const charTimeout = new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('Characteristic discovery timeout')), 5000)
+                    );
+
+                    const chars = await Promise.race([charPromise, charTimeout]);
 
                     this.characteristic = chars.find(c => c.uuid === writeCharUuid);
                     this.notifyCharacteristic = chars.find(c => c.uuid === notifyCharUuid);
