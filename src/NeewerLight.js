@@ -64,121 +64,55 @@ export class NeewerLight extends EventEmitter {
                 );
 
                 await Promise.race([connectPromise, timeoutPromise]);
-                console.log(`Connected! Getting characteristics...`);
+                console.log(`Connected! Setting up characteristics...`);
 
-                // Try direct characteristic access first (faster, less likely to fail)
+                // We already know the UUIDs - just get the service and characteristics directly
+                const serviceUuid = '69400001b5a3f393e0a9e50e24dcca99';
+                const writeCharUuid = '69400002b5a3f393e0a9e50e24dcca99';
+                const notifyCharUuid = '69400003b5a3f393e0a9e50e24dcca99';
+
                 try {
-                    const serviceUuid = '69400001b5a3f393e0a9e50e24dcca99';
-                    const writeCharUuid = '69400002b5a3f393e0a9e50e24dcca99';
-                    const notifyCharUuid = '69400003b5a3f393e0a9e50e24dcca99';
-
-                    // Discover only the specific service we need
+                    // Get the service (quick)
                     const services = await this.peripheral.discoverServicesAsync([serviceUuid]);
 
-                    if (services.length > 0) {
-                        const service = services[0];
-                        console.log(`  Found Neewer service`);
+                    if (services.length === 0) {
+                        throw new Error('Neewer service not found');
+                    }
 
-                        // Discover only the characteristics we need
-                        const chars = await service.discoverCharacteristicsAsync([writeCharUuid, notifyCharUuid]);
+                    const service = services[0];
 
-                        this.characteristic = chars.find(c => c.uuid === writeCharUuid);
-                        this.notifyCharacteristic = chars.find(c => c.uuid === notifyCharUuid);
+                    // Get only the two characteristics we need (quick)
+                    const chars = await service.discoverCharacteristicsAsync([writeCharUuid, notifyCharUuid]);
 
-                        if (!this.characteristic) {
-                            throw new Error('Could not find write characteristic');
+                    this.characteristic = chars.find(c => c.uuid === writeCharUuid);
+                    this.notifyCharacteristic = chars.find(c => c.uuid === notifyCharUuid);
+
+                    if (!this.characteristic) {
+                        throw new Error('Write characteristic not found');
+                    }
+
+                    console.log(`  ✓ Ready to control`);
+
+                    // Optional: Subscribe to notifications (don't fail if this doesn't work)
+                    if (this.notifyCharacteristic) {
+                        try {
+                            await this.notifyCharacteristic.subscribeAsync();
+                            this.notifyCharacteristic.on('data', (data) => {
+                                if (data.length < 5) return;
+                                this.parseNotification(data);
+                            });
+                        } catch (err) {
+                            // Notifications not critical - just skip
                         }
-
-                        console.log(`  ✓ Found write characteristic`);
-
-                        if (this.notifyCharacteristic) {
-                            console.log(`  ✓ Found notify characteristic`);
-                            try {
-                                await this.notifyCharacteristic.subscribeAsync();
-                                console.log(`  ✓ Subscribed to notifications`);
-
-                                this.notifyCharacteristic.on('data', (data) => {
-                                    if (data.length < 5) return;
-                                    this.parseNotification(data);
-                                });
-                            } catch (err) {
-                                console.log(`  ⚠ Could not subscribe: ${err.message}`);
-                            }
-                        }
-
-                        this.connected = true;
-                        console.log(`✓ Successfully connected to ${this.name}`);
-                        return; // Success - exit here
                     }
 
-                    throw new Error('Service not found');
+                    this.connected = true;
+                    console.log(`✓ ${this.name} ready`);
+                    return; // Success!
 
-                } catch (directError) {
-                    console.log(`  Direct access failed: ${directError.message}, trying full discovery...`);
+                } catch (error) {
+                    throw new Error(`Setup failed: ${error.message}`);
                 }
-
-                // Fallback: Full discovery if direct access failed
-                const discoverPromise = this.peripheral.discoverAllServicesAndCharacteristicsAsync();
-                const discoverTimeout = new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('Service discovery timeout')), 12000)
-                );
-
-                const { services, characteristics } = await Promise.race([discoverPromise, discoverTimeout]);
-
-                console.log(`Found ${services.length} service(s) and ${characteristics.length} characteristic(s)`);
-
-                // Find write characteristic
-                this.characteristic = characteristics.find(
-                    c => c.uuid === GATT_CHARACTERISTIC_UUID
-                );
-
-                if (!this.characteristic) {
-                    console.warn(`Could not find expected characteristic ${GATT_CHARACTERISTIC_UUID}`);
-                    console.warn('Trying alternate characteristic search...');
-
-                    this.characteristic = characteristics.find(
-                        c => c.properties.includes('write') || c.properties.includes('writeWithoutResponse')
-                    );
-
-                    if (this.characteristic) {
-                        console.log(`Using alternate characteristic: ${this.characteristic.uuid}`);
-                    } else {
-                        throw new Error('Could not find any writable characteristic');
-                    }
-                }
-
-                // Find notify characteristic for reading state changes
-                const notifyChar = characteristics.find(
-                    c => c.uuid === '69400003b5a3f393e0a9e50e24dcca99' && c.properties.includes('notify')
-                );
-
-                if (notifyChar) {
-                    console.log(`  Found notify characteristic: ${notifyChar.uuid}`);
-                    this.notifyCharacteristic = notifyChar; // Store for polling
-
-                    try {
-                        await notifyChar.subscribeAsync();
-                        console.log(`✓ Subscribed to notifications from ${this.name}`);
-
-                        notifyChar.on('data', (data) => {
-                            // Ignore empty or single-byte keepalive messages
-                            if (data.length < 5) {
-                                return;
-                            }
-                            console.log(`📩 ${this.name} notification data:`, Array.from(data).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' '));
-                            this.parseNotification(data);
-                        });
-                    } catch (err) {
-                        console.log(`  ⚠ Could not subscribe to notifications: ${err.message}`);
-                    }
-                } else {
-                    console.log(`  ⚠ No notify characteristic found`);
-                }
-
-                this.connected = true;
-                console.log(`✓ Successfully connected to ${this.name}`);
-                console.log(`  Using characteristic: ${this.characteristic.uuid}`);
-                return; // Success!
 
             } catch (error) {
                 lastError = error;
@@ -206,24 +140,23 @@ export class NeewerLight extends EventEmitter {
      * Read current status from the light
      */
     async readStatus() {
-        if (!this.connected || !this.characteristic) {
+        if (!this.connected || !this.characteristic || !this.notifyCharacteristic) {
             return;
         }
 
         try {
             // Just verify connection is alive by reading a characteristic
-            // Don't send any commands that would change the light state
-            if (this.notifyCharacteristic) {
-                // Try to read the notify characteristic (non-destructive)
-                await this.notifyCharacteristic.readAsync();
-            }
+            await this.notifyCharacteristic.readAsync();
             // Connection is alive if we got here
 
         } catch (error) {
-            // Connection is dead - mark as disconnected and emit event
-            console.log(`⚠ ${this.name} connection dead during poll: ${error.message}`);
-            this.connected = false;
-            this.emit('disconnected');
+            // Only log once and mark as dead
+            if (this.connected) {
+                console.log(`⚠ ${this.name} connection dead during poll`);
+                this.connected = false;
+                this.emit('disconnected');
+            }
+            // Don't log subsequent failures - already marked as dead
         }
     }
 
