@@ -132,22 +132,31 @@ export class LightManager extends EventEmitter {
             const results = [];
 
             for (const [mac, light] of this.lights) {
-                // Skip if not connected (double-check)
-                if (!light.connected) {
+                // Multiple checks to ensure we only poll truly connected lights
+                if (!light || !light.connected || !light.peripheral || !light.readStatus) {
                     continue;
                 }
 
-                // Only poll if connected AND has a real peripheral
-                if (light.peripheral && light.readStatus) {
-                    try {
-                        await light.readStatus();
+                // Check peripheral state too
+                if (light.peripheral.state !== 'connected') {
+                    if (light.connected) {
+                        console.log(`⚠ ${light.name} peripheral shows disconnected`);
+                        light.connected = false;
+                        this.emitStatus();
+                    }
+                    continue;
+                }
 
-                        // If still connected after read, mark as alive
-                        if (light.connected) {
-                            results.push(`${light.name}:✓`);
-                        }
-                    } catch (error) {
-                        // readStatus handles marking as disconnected
+                try {
+                    await light.readStatus();
+
+                    // If still connected after read, mark as alive
+                    if (light.connected) {
+                        results.push(`${light.name}:✓`);
+                    }
+                } catch (error) {
+                    // readStatus handles marking as disconnected
+                    if (light.connected) {
                         results.push(`${light.name}:✗`);
                     }
                 }

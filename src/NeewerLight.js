@@ -150,7 +150,23 @@ export class NeewerLight extends EventEmitter {
      * Read current status from the light
      */
     async readStatus() {
-        if (!this.connected || !this.characteristic || !this.notifyCharacteristic) {
+        // Triple check - don't even try if not connected
+        if (!this.connected) {
+            return;
+        }
+
+        if (!this.characteristic || !this.notifyCharacteristic) {
+            this.connected = false;
+            return;
+        }
+
+        // Check peripheral state
+        if (this.peripheral.state !== 'connected') {
+            if (this.connected) {
+                console.log(`⚠ ${this.name} peripheral disconnected`);
+                this.connected = false;
+                this.emit('disconnected');
+            }
             return;
         }
 
