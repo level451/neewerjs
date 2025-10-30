@@ -7,6 +7,9 @@
   "scripts": {
     "start": "node src/index.js",
     "scan": "node src/examples/scan.js",
+    "debug": "node src/examples/debug-connect.js",
+    "manual": "node src/examples/manual-discover.js",
+    "direct": "node src/examples/direct-access.js",
     "dev": "node --watch src/index.js"
   },
   "keywords": [
@@ -19,7 +22,8 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@stoprocent/noble": "^1.15.1"
+    "@stoprocent/noble": "^1.15.1",
+    "ws": "^8.18.0"
   },
   "engines": {
     "node": ">=16.0.0"
