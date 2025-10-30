@@ -1,8 +1,8 @@
-// WebSocket Server - API for controlling lights
+// WebSocket Server - Accepts JSON commands and broadcasts status
 
-import { WebSocketServer } from 'ws';
+import { WebSocketServer as WSServer } from 'ws';
 
-export class NeewerWebSocketServer {
+export class WebSocketServer {
     constructor(lightManager, port = 8080) {
         this.lightManager = lightManager;
         this.port = port;
@@ -14,9 +14,7 @@ export class NeewerWebSocketServer {
      * Start the WebSocket server
      */
     start() {
-        this.wss = new WebSocketServer({ port: this.port });
-
-        console.log(`\n🌐 WebSocket server started on port ${this.port}`);
+        this.wss = new WSServer({ port: this.port });
 
         this.wss.on('connection', (ws) => {
             console.log(`\n🔌 WebSocket client connected (Total: ${this.wss.clients.size})`);
@@ -31,24 +29,20 @@ export class NeewerWebSocketServer {
             ws.on('message', async (data) => {
                 try {
                     const message = JSON.parse(data.toString());
-                    console.log(`📥 Received:`, message);
-
                     await this.handleCommand(message, ws);
                 } catch (error) {
-                    console.error('Error handling message:', error);
-                    ws.send(JSON.stringify({
-                        error: error.message
-                    }));
+                    this.sendError(ws, error.message);
                 }
             });
 
             ws.on('close', () => {
-                console.log(`\n🔌 WebSocket client disconnected (Remaining: ${this.wss.clients.size - 1})`);
+                console.log(`\n🔌 WebSocket client disconnected (Total: ${this.wss.clients.size - 1})`);
                 this.clients.delete(ws);
             });
 
             ws.on('error', (error) => {
-                console.error('WebSocket error:', error);
+                console.error('WebSocket error:', error.message);
+                this.clients.delete(ws);
             });
         });
 
@@ -56,19 +50,24 @@ export class NeewerWebSocketServer {
         this.lightManager.on('status', (status) => {
             this.broadcast(status);
         });
+
+        console.log(`\n🚀 WebSocket server running on ws://localhost:${this.port}`);
     }
 
     /**
-     * Handle incoming commands
+     * Handle incoming command
      */
     async handleCommand(message, ws) {
-        switch (message.action) {
+        console.log('\n📨 Received command:', JSON.stringify(message));
+
+        const { action, mac, brightness, temperature } = message;
+
+        switch (action) {
             case 'setCCT':
-                await this.lightManager.setCCT(
-                    message.brightness,
-                    message.temperature,
-                    message.mac
-                );
+                if (brightness === undefined || temperature === undefined) {
+                    throw new Error('setCCT requires brightness and temperature');
+                }
+                await this.lightManager.setCCT(mac || null, brightness, temperature);
                 break;
 
             case 'getStatus':
@@ -77,32 +76,41 @@ export class NeewerWebSocketServer {
                 break;
 
             default:
-                ws.send(JSON.stringify({
-                    error: 'Unknown action: ' + message.action
-                }));
+                throw new Error(`Unknown action: ${action}`);
         }
     }
 
     /**
      * Broadcast message to all connected clients
      */
-    broadcast(data) {
-        const message = JSON.stringify(data);
-
+    broadcast(message) {
+        const data = JSON.stringify(message);
         for (const client of this.clients) {
-            if (client.readyState === client.OPEN) {
-                client.send(message);
+            if (client.readyState === 1) { // OPEN
+                client.send(data);
             }
         }
     }
 
     /**
-     * Stop the WebSocket server
+     * Send error to specific client
+     */
+    sendError(ws, errorMessage) {
+        const error = {
+            error: true,
+            message: errorMessage,
+            timestamp: new Date().toISOString()
+        };
+        ws.send(JSON.stringify(error));
+    }
+
+    /**
+     * Stop the server
      */
     stop() {
         if (this.wss) {
+            console.log('\n🛑 Stopping WebSocket server...');
             this.wss.close();
-            console.log('WebSocket server stopped');
         }
     }
 }
