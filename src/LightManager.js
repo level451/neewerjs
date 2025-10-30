@@ -24,8 +24,8 @@ export class LightManager extends EventEmitter {
         console.log('Initializing Light Manager...');
         console.log(`Looking for ${LIGHTS.length} configured lights...\n`);
 
-        // Scan for lights - stop as soon as we find all 4, max 20 seconds
-        const discoveredLights = await this.scanner.scan(20000, false, LIGHTS.length);
+        // Scan for lights - stop as soon as we find all 4, max 10 seconds
+        const discoveredLights = await this.scanner.scan(10000, false, LIGHTS.length);
 
         // Find and connect to our configured lights
         const connectionPromises = [];
@@ -132,31 +132,22 @@ export class LightManager extends EventEmitter {
             const results = [];
 
             for (const [mac, light] of this.lights) {
-                // Multiple checks to ensure we only poll truly connected lights
-                if (!light || !light.connected || !light.peripheral || !light.readStatus) {
+                // Skip if not connected (double-check)
+                if (!light.connected) {
                     continue;
                 }
 
-                // Check peripheral state too
-                if (light.peripheral.state !== 'connected') {
-                    if (light.connected) {
-                        console.log(`⚠ ${light.name} peripheral shows disconnected`);
-                        light.connected = false;
-                        this.emitStatus();
-                    }
-                    continue;
-                }
+                // Only poll if connected AND has a real peripheral
+                if (light.peripheral && light.readStatus) {
+                    try {
+                        await light.readStatus();
 
-                try {
-                    await light.readStatus();
-
-                    // If still connected after read, mark as alive
-                    if (light.connected) {
-                        results.push(`${light.name}:✓`);
-                    }
-                } catch (error) {
-                    // readStatus handles marking as disconnected
-                    if (light.connected) {
+                        // If still connected after read, mark as alive
+                        if (light.connected) {
+                            results.push(`${light.name}:✓`);
+                        }
+                    } catch (error) {
+                        // readStatus handles marking as disconnected
                         results.push(`${light.name}:✗`);
                     }
                 }
@@ -259,7 +250,7 @@ export class LightManager extends EventEmitter {
                 if (!light.peripheral || !light.peripheral.address) {
                     console.log(`  Rescanning for ${light.name}...`);
                     try {
-                        const discovered = await this.scanner.scan(20000, false); // Scan for 10 sec
+                        const discovered = await this.scanner.scan(10000, false); // Scan for 10 sec
                         const found = discovered.find(l =>
                             l.address.toLowerCase() === mac.toLowerCase()
                         );

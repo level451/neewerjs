@@ -17,18 +17,16 @@ export class CommandBuilder {
     /**
      * Set CCT (Color Temperature) and Brightness
      * @param {number} brightness - 0-100
-     * @param {number} temperature - 2700-6500 (Kelvin)
+     * @param {number} temperature - 3200-8500 (Kelvin)
      * @returns {Buffer}
      */
     static setCCT(brightness, temperature) {
         // Clamp values
         brightness = Math.max(0, Math.min(100, Math.round(brightness)));
-        temperature = Math.max(2700, Math.min(6500, Math.round(temperature)));
+        temperature = Math.max(3200, Math.min(8500, Math.round(temperature)));
 
-        // Convert temperature to byte value
-        // 2700K = 32 (0x20), 6500K = 85 (0x55)
-        // Range: 2700-6500K maps to 32-85 (53 steps for 3800K range)
-        const tempByte = Math.round(((temperature - 2700) / 3800) * 53 + 32);
+        // Convert temperature to byte value (32-85 range for 3200K-8500K)
+        const tempByte = Math.round(((temperature - 3200) / 6300) * 53 + 32);
 
         // Build command: [prefix, mode, 0x02, brightness, temp, checksum]
         const command = [
