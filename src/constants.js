@@ -26,7 +26,6 @@ export const NEEWER_NAME_PATTERNS = [
     'ZRP'
 ];
 
-
 // Light capabilities
 export const LIGHT_TYPES = {
     CCT_ONLY: 'cct_only',
