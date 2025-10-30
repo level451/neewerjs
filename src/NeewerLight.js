@@ -13,6 +13,7 @@ export class NeewerLight extends EventEmitter {
         this.name = peripheral.advertisement.localName || 'Unknown Neewer Light';
         this.rssi = peripheral.rssi;
         this.connected = false;
+        this.connecting = false; // Track if connection in progress
         this.characteristic = null;
         this.notifyCharacteristic = null; // Store for polling
 
@@ -45,6 +46,12 @@ export class NeewerLight extends EventEmitter {
             return;
         }
 
+        if (this.connecting) {
+            console.log(`Light ${this.name} connection already in progress`);
+            return;
+        }
+
+        this.connecting = true; // Mark as connecting
         let lastError = null;
 
         for (let attempt = 1; attempt <= retries; attempt++) {
@@ -117,6 +124,7 @@ export class NeewerLight extends EventEmitter {
                     }
 
                     this.connected = true;
+                    this.connecting = false;
                     console.log(`✓ ${this.name} ready`);
                     return; // Success!
 
@@ -143,6 +151,7 @@ export class NeewerLight extends EventEmitter {
         }
 
         // All retries failed
+        this.connecting = false;
         throw new Error(`Failed to connect after ${retries} attempts: ${lastError.message}`);
     }
 
@@ -150,6 +159,11 @@ export class NeewerLight extends EventEmitter {
      * Read current status from the light
      */
     async readStatus() {
+        // Don't poll if connection is in progress!
+        if (this.connecting) {
+            return;
+        }
+
         // Triple check - don't even try if not connected
         if (!this.connected) {
             return;
