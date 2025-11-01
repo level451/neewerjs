@@ -6,6 +6,11 @@ import { NeewerLight } from './NeewerLight.js';
 import { CommandBuilder } from './CommandBuilder.js';
 import { LIGHTS } from './lightConfig.js';
 
+// Tunables
+const INITIAL_SCAN_MS = 5000;   // first scan on startup (was 10000)
+const RECONNECT_SCAN_MS = 4000; // rescans for missing lights
+const HOURLY_SWEEP_MS = 60 * 60 * 1000;
+
 export class LightManager extends EventEmitter {
     constructor() {
         super();
@@ -15,6 +20,26 @@ export class LightManager extends EventEmitter {
         this.reconnectTimers = new Map();
         this.pollInterval = 5000; // Poll lights every 5 seconds
         this.pollTimer = null;
+
+        // NEW: we only ever want ONE BLE scan at a time
+        this.activeScanPromise = null;
+    }
+
+    /**
+     * Run a single scan that everyone can reuse.
+     */
+    async getSharedScan(durationMs) {
+        if (this.activeScanPromise) {
+            // someone is already scanning, just reuse their result
+            return this.activeScanPromise;
+        }
+        this.activeScanPromise = this.scanner.scan(durationMs, false);
+        try {
+            const result = await this.activeScanPromise;
+            return result;
+        } finally {
+            this.activeScanPromise = null;
+        }
     }
 
     /**
@@ -24,8 +49,8 @@ export class LightManager extends EventEmitter {
         console.log('Initializing Light Manager...');
         console.log(`Looking for ${LIGHTS.length} configured lights...\n`);
 
-        // Scan for lights - stop as soon as we find all 4, max 10 seconds
-        const discoveredLights = await this.scanner.scan(10000, false, LIGHTS.length);
+        // Scan for lights BUT only 5 seconds now, and make it shared
+        const discoveredLights = await this.getSharedScan(INITIAL_SCAN_MS); // shared scan
 
         // Find and connect to our configured lights
         const connectionPromises = [];
@@ -56,7 +81,7 @@ export class LightManager extends EventEmitter {
                 });
 
                 // Listen for state changes from the light
-                light.on('stateChanged', (state) => {
+                light.on('stateChanged', () => {
                     console.log(`📢 ${light.name} changed via physical controls`);
                     this.emitStatus();
                 });
@@ -80,8 +105,7 @@ export class LightManager extends EventEmitter {
             } else {
                 console.log(`⚠ ${config.name} (${config.mac}) not found - will keep trying to connect`);
 
-                // Create a placeholder light entry for missing lights
-                // We'll get the real peripheral during rescan
+                // Placeholder
                 const placeholderLight = {
                     name: config.name,
                     mac: config.mac.toLowerCase(),
@@ -92,10 +116,9 @@ export class LightManager extends EventEmitter {
                     }
                 };
 
-                // Store just enough info to retry later
                 this.lights.set(config.mac.toLowerCase(), {
                     name: config.name,
-                    peripheral: null, // No peripheral yet
+                    peripheral: null,
                     connected: false,
                     rssi: 0,
                     state: {
@@ -119,14 +142,14 @@ export class LightManager extends EventEmitter {
         // Start polling lights
         this.startPolling();
 
-        // Optional: periodic sweep to re-attempt any that are still down
+        // Hourly sweep for anything still down
         setInterval(() => {
             for (const [mac, l] of this.lights) {
                 if (!l.connected && !l.isBusy) {
                     this.scheduleReconnect(mac);
                 }
             }
-        }, 60 * 60 * 1000); // hourly
+        }, HOURLY_SWEEP_MS);
     }
 
     /**
@@ -146,17 +169,13 @@ export class LightManager extends EventEmitter {
                     continue;
                 }
 
-                // Only poll if connected AND has a real peripheral
                 if (light.peripheral && light.readStatus) {
                     try {
                         await light.readStatus();
-
-                        // If still connected after read, mark as alive
                         if (light.connected) {
                             results.push(`${light.name}:✓`);
                         }
                     } catch (error) {
-                        // readStatus already marks disconnected & emits
                         results.push(`${light.name}:✗`);
                     }
                 }
@@ -255,7 +274,7 @@ export class LightManager extends EventEmitter {
         console.log(`⏰ Will retry ${light?.name || mac} in ${this.reconnectInterval/1000} seconds`);
 
         const timer = setTimeout(async () => {
-            this.reconnectTimers.delete(mac); // Remove timer reference
+            this.reconnectTimers.delete(mac);
             const l = this.lights.get(mac);
             if (!l) {
                 console.log(`   ${mac} missing, skipping`);
@@ -273,11 +292,11 @@ export class LightManager extends EventEmitter {
 
             console.log(`\n🔄 Reconnecting to ${l.name}...`);
 
-            // If we don't have a peripheral, rescan for it
+            // If we don't have a peripheral, run a SHARED rescan
             if (!l.peripheral || !l.peripheral.address) {
-                console.log(`  Rescanning for ${l.name}...`);
+                console.log(`  Rescanning for ${l.name} (shared)...`);
                 try {
-                    const discovered = await this.scanner.scan(10000, false); // Scan for 10 sec
+                    const discovered = await this.getSharedScan(RECONNECT_SCAN_MS);
                     const found = discovered.find(d =>
                         d.address.toLowerCase() === mac.toLowerCase()
                     );
@@ -310,12 +329,12 @@ export class LightManager extends EventEmitter {
 
                         console.log(`  Found ${realLight.name}, connecting...`);
                     } else {
-                        console.log(`  ${l.name} not found in scan`);
-                        this.scheduleReconnect(mac); // Try again
+                        console.log(`  ${l.name} not found in shared scan`);
+                        this.scheduleReconnect(mac); // Try again later
                         return;
                     }
                 } catch (err) {
-                    console.log(`  Scan failed: ${err.message}`);
+                    console.log(`  Shared scan failed: ${err.message}`);
                     this.scheduleReconnect(mac); // Try again
                     return;
                 }
@@ -329,15 +348,11 @@ export class LightManager extends EventEmitter {
 
     /**
      * Set CCT for one or all lights
-     * @param {string|null} mac - Specific light MAC or null for all
-     * @param {number} brightness - 0-100
-     * @param {number} temperature - 3200-8500K
      */
     async setCCT(mac, brightness, temperature) {
         const command = CommandBuilder.setCCT(brightness, temperature);
 
         if (mac === null || mac === 'all') {
-            // Send to all connected lights
             const results = [];
             for (const [lightMac, light] of this.lights) {
                 if (light.connected) {
@@ -356,7 +371,6 @@ export class LightManager extends EventEmitter {
             this.emitStatus();
             return results;
         } else {
-            // Send to specific light
             const light = this.lights.get(mac.toLowerCase());
             if (!light) {
                 throw new Error(`Light ${mac} not found`);
@@ -410,7 +424,6 @@ export class LightManager extends EventEmitter {
             }
         }
 
-        // Set the light_N boolean flags
         status.lights.forEach((light, index) => {
             status[`light_${index + 1}`] = light.connected;
         });
@@ -425,7 +438,6 @@ export class LightManager extends EventEmitter {
         const status = this.getStatus();
         this.emit('status', status);
 
-        // Compact one-line summary
         const summary = status.lights.map(l =>
             `${l.name}: ${l.connected ? '🟢' : '🔴'} ${l.brightness}%@${l.temperature}K`
         ).join(' | ');
