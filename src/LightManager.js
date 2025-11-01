@@ -7,8 +7,8 @@ import { CommandBuilder } from './CommandBuilder.js';
 import { LIGHTS } from './lightConfig.js';
 
 // Tunables
-const INITIAL_SCAN_MS = 3000;      // faster first scan (3s) with early-stop
-const RECONNECT_SCAN_MS = 4000;    // shared rescans
+const INITIAL_SCAN_MS = 3000;      // initial shared scan (fast, early-stop via target MACs)
+const RECONNECT_SCAN_MS = 4000;    // shared rescans for missing lights
 const HOURLY_SWEEP_MS = 60 * 60 * 1000;
 const CONNECT_CONCURRENCY = 2;     // limit concurrent connect/discover
 const CONNECT_STAGGER_MS = 150;    // slight jitter to avoid adapter spikes
@@ -29,29 +29,58 @@ export class LightManager extends EventEmitter {
         // Simple semaphore for connecting
         this.activeConnects = 0;
         this.connectQueue = [];
+
+        // NEW: pause the polling loop while scans/connects are in flight
+        this.pollPaused = false;
+
+        // Optional: track adaptive reconnect attempts (can be used later)
+        this.reconnectAttempts = new Map(); // mac -> count
     }
 
     /**
      * Run a single shared scan; pass target MACs for early-stop.
+     * Polling is paused while scanning.
      */
     async getSharedScan(durationMs, targetMacs = null) {
         if (this.activeScanPromise) return this.activeScanPromise;
-        // allowDuplicates=true; early stop when all targetMacs are seen
+
+        // Pause poll while the adapter is scanning
+        this.pollPaused = true;
         this.activeScanPromise = this.scanner.scan(durationMs, true, targetMacs);
-        try { return await this.activeScanPromise; }
-        finally { this.activeScanPromise = null; }
+
+        try {
+            return await this.activeScanPromise;
+        } finally {
+            this.activeScanPromise = null;
+            // Resume polling only if no connects are in flight
+            if (this.activeConnects === 0) this.pollPaused = false;
+        }
     }
 
+    /**
+     * Acquire a connection slot (limits concurrent connects).
+     * Polling is paused while we have active connects.
+     */
     async acquireConnectSlot() {
         if (this.activeConnects < CONNECT_CONCURRENCY) {
             this.activeConnects++;
+            this.pollPaused = true; // pause while any connects in flight
             return;
         }
         await new Promise(res => this.connectQueue.push(res));
         this.activeConnects++;
+        this.pollPaused = true;
     }
+
+    /**
+     * Release a connection slot.
+     * Resume polling if no connects or scans are active.
+     */
     releaseConnectSlot() {
         this.activeConnects = Math.max(0, this.activeConnects - 1);
+        if (this.activeConnects === 0 && !this.activeScanPromise) {
+            this.pollPaused = false; // safe to resume
+        }
         const next = this.connectQueue.shift();
         if (next) next();
     }
@@ -136,6 +165,7 @@ export class LightManager extends EventEmitter {
         this.emitStatus();
         this.startPolling();
 
+        // Hourly sweep to re-attempt any that are still down
         setInterval(() => {
             for (const [mac, l] of this.lights) {
                 if (!l.connected && !l.isBusy) this.scheduleReconnect(mac);
@@ -143,29 +173,43 @@ export class LightManager extends EventEmitter {
         }, HOURLY_SWEEP_MS);
     }
 
+    /**
+     * Start polling all lights for status
+     * (skips entire cycle when pollPaused is true)
+     */
     startPolling() {
         console.log(`\n🔄 Starting status polling every ${this.pollInterval/1000} seconds`);
+
         let pollCount = 0;
         this.pollTimer = setInterval(async () => {
+            if (this.pollPaused) return; // <<< global pause during scans/connects
+
             pollCount++;
             const results = [];
+
             for (const [mac, light] of this.lights) {
+                // Skip if not connected OR the device is busy connecting/setting up
                 if (!light.connected || light.isBusy) continue;
+
                 if (light.peripheral && light.readStatus) {
                     try {
-                        await light.readStatus();
+                        await light.readStatus(); // liveness probe (characteristic read)
                         if (light.connected) results.push(`${light.name}:✓`);
                     } catch (_) {
                         results.push(`${light.name}:✗`);
                     }
                 }
             }
+
             if (results.length > 0) {
                 console.log(`💓 Poll #${pollCount}: ${results.join(' | ')}`);
             }
         }, this.pollInterval);
     }
 
+    /**
+     * Stop polling
+     */
     stopPolling() {
         if (this.pollTimer) {
             clearInterval(this.pollTimer);
@@ -173,6 +217,9 @@ export class LightManager extends EventEmitter {
         }
     }
 
+    /**
+     * Connect to a specific light
+     */
     async connectLight(mac) {
         const light = this.lights.get(mac.toLowerCase());
         if (!light) return false;
@@ -195,25 +242,36 @@ export class LightManager extends EventEmitter {
             const timeoutPromise = new Promise((_, reject) =>
                 setTimeout(() => reject(new Error('Connection attempt timeout')), 25000)
             );
+
             await Promise.race([connectPromise, timeoutPromise]);
 
             console.log(`✓ ${light.name} connected successfully`);
             this.emitStatus();
 
+            // Cancel any reconnect timer
             const t = this.reconnectTimers.get(mac);
             if (t) { clearTimeout(t); this.reconnectTimers.delete(mac); }
+
+            // Reset adaptive attempt counter on success
+            this.reconnectAttempts.set(mac, 0);
 
             return true;
         } catch (error) {
             console.error(`Failed to connect to ${light.name}: ${error.message}`);
             light.connected = false;
+
+            // Force disconnect to clean up
             try { if (light.peripheral) await light.peripheral.disconnectAsync(); } catch (_) {}
+
             this.emitStatus();
             this.scheduleReconnect(mac);
             return false;
         }
     }
 
+    /**
+     * Schedule reconnection attempt (deduped)
+     */
     scheduleReconnect(mac) {
         const existing = this.reconnectTimers.get(mac);
         if (existing) { clearTimeout(existing); this.reconnectTimers.delete(mac); }
@@ -281,6 +339,12 @@ export class LightManager extends EventEmitter {
         this.reconnectTimers.set(mac, timer);
     }
 
+    /**
+     * Set CCT for one or all lights
+     * @param {string|null} mac - Specific light MAC or null/'all'
+     * @param {number} brightness - 0-100
+     * @param {number} temperature - Kelvin
+     */
     async setCCT(mac, brightness, temperature) {
         const command = CommandBuilder.setCCT(brightness, temperature);
 
@@ -315,6 +379,9 @@ export class LightManager extends EventEmitter {
         }
     }
 
+    /**
+     * Get status of all lights
+     */
     getStatus() {
         const status = {
             timestamp: new Date().toISOString(),
@@ -327,6 +394,7 @@ export class LightManager extends EventEmitter {
 
         for (const config of LIGHTS) {
             const light = this.lights.get(config.mac.toLowerCase());
+
             if (light) {
                 status.lights.push({
                     name: light.name,
@@ -348,29 +416,46 @@ export class LightManager extends EventEmitter {
             }
         }
 
-        status.lights.forEach((light, i) => {
-            status[`light_${i + 1}`] = light.connected;
+        // Set the light_N boolean flags
+        status.lights.forEach((light, index) => {
+            status[`light_${index + 1}`] = light.connected;
         });
 
         return status;
     }
 
+    /**
+     * Emit status update
+     */
     emitStatus() {
         const status = this.getStatus();
         this.emit('status', status);
+
+        // Compact one-line summary
         const summary = status.lights.map(l =>
             `${l.name}: ${l.connected ? '🟢' : '🔴'} ${l.brightness}%@${l.temperature}K`
         ).join(' | ');
         console.log(`📊 ${summary}`);
     }
 
+    /**
+     * Shutdown - disconnect all lights
+     */
     async shutdown() {
         console.log('\nShutting down Light Manager...');
+
+        // Stop polling
         this.stopPolling();
+
+        // Clear all reconnect timers
         for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
         this.reconnectTimers.clear();
+
+        // Disconnect all lights
         for (const light of this.lights.values()) {
-            if (light.connected) await light.disconnect();
+            if (light.connected) {
+                await light.disconnect();
+            }
         }
     }
 }
