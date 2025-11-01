@@ -16,6 +16,9 @@ export class NeewerLight extends EventEmitter {
         this.characteristic = null;
         this.notifyCharacteristic = null; // Store for polling
 
+        // New: busy flag so polling/pings don't collide with connect/discover
+        this.isBusy = false;
+
         // Light capabilities (will be determined on connection)
         this.capabilities = {
             supportsCCT: true,
@@ -40,18 +43,23 @@ export class NeewerLight extends EventEmitter {
      * Connect to the light
      */
     async connect(timeout = 15000, retries = 2) {
+        // Avoid parallel connects; let the manager schedule another attempt later
         if (this.connected) {
             console.log(`Light ${this.name} is already connected`);
             return;
         }
+        if (this.isBusy) {
+            console.log(`Light ${this.name} is busy; skipping connect attempt`);
+            return;
+        }
 
+        this.isBusy = true;
         let lastError = null;
 
         for (let attempt = 1; attempt <= retries; attempt++) {
             try {
                 if (attempt > 1) {
                     console.log(`Retry attempt ${attempt}/${retries}...`);
-                    // Wait a bit between retries
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 }
 
@@ -66,7 +74,7 @@ export class NeewerLight extends EventEmitter {
                 await Promise.race([connectPromise, timeoutPromise]);
                 console.log(`Connected! Setting up characteristics...`);
 
-                // We already know the UUIDs - just get the service and characteristics directly
+                // Known UUIDs
                 const serviceUuid = '69400001b5a3f393e0a9e50e24dcca99';
                 const writeCharUuid = '69400002b5a3f393e0a9e50e24dcca99';
                 const notifyCharUuid = '69400003b5a3f393e0a9e50e24dcca99';
@@ -103,7 +111,7 @@ export class NeewerLight extends EventEmitter {
 
                     console.log(`  ✓ Ready to control`);
 
-                    // Optional: Subscribe to notifications (don't fail if this doesn't work)
+                    // Optional: subscribe to notifications
                     if (this.notifyCharacteristic) {
                         try {
                             await this.notifyCharacteristic.subscribeAsync();
@@ -112,11 +120,12 @@ export class NeewerLight extends EventEmitter {
                                 this.parseNotification(data);
                             });
                         } catch (err) {
-                            // Notifications not critical - just skip
+                            // Notifications not critical - skip if not supported
                         }
                     }
 
                     this.connected = true;
+                    this.isBusy = false;
                     console.log(`✓ ${this.name} ready`);
                     return; // Success!
 
@@ -132,41 +141,40 @@ export class NeewerLight extends EventEmitter {
                 try {
                     await this.peripheral.disconnectAsync();
                 } catch (e) {
-                    // Ignore disconnect errors
+                    // Ignore
                 }
 
-                // If this wasn't the last attempt, continue to retry
-                if (attempt < retries) {
-                    continue;
-                }
+                // Continue to next retry if any remain
             }
         }
 
+        this.isBusy = false;
         // All retries failed
-        throw new Error(`Failed to connect after ${retries} attempts: ${lastError.message}`);
+        throw new Error(`Failed to connect after ${retries} attempts: ${lastError?.message || 'unknown error'}`);
     }
 
     /**
      * Read current status from the light
      */
     async readStatus() {
+        // Only verify live connections and valid chars
         if (!this.connected || !this.characteristic || !this.notifyCharacteristic) {
             return;
         }
 
         try {
-            // Just verify connection is alive by reading a characteristic
+            // Lightweight "are you alive" read
             await this.notifyCharacteristic.readAsync();
-            // Connection is alive if we got here
+            // If we got here, connection is alive
 
         } catch (error) {
-            // Only log once and mark as dead
+            // Mark as dead once and notify manager to schedule reconnect
             if (this.connected) {
-                console.log(`⚠ ${this.name} connection dead during poll`);
+                console.log(`⚠ ${this.name} connection dead during poll: ${error.message}`);
                 this.connected = false;
-                this.emit('disconnected');
+                this.emit('disconnected'); // ensure LightManager schedules reconnect
             }
-            // Don't log subsequent failures - already marked as dead
+            throw error; // bubble up to polling summary
         }
     }
 
@@ -241,7 +249,7 @@ export class NeewerLight extends EventEmitter {
             const buffer = Buffer.from(commandBytes);
             await this.characteristic.writeAsync(buffer, false);
         } catch (error) {
-            console.error(`Failed to send command to ${this.name}:`, error.message);
+            console.error(`Failed to send command to ${this.name}: ${error.message}`);
             throw error;
         }
     }

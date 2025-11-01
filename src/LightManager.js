@@ -118,6 +118,15 @@ export class LightManager extends EventEmitter {
 
         // Start polling lights
         this.startPolling();
+
+        // Optional: periodic sweep to re-attempt any that are still down
+        setInterval(() => {
+            for (const [mac, l] of this.lights) {
+                if (!l.connected && !l.isBusy) {
+                    this.scheduleReconnect(mac);
+                }
+            }
+        }, 60 * 60 * 1000); // hourly
     }
 
     /**
@@ -132,8 +141,8 @@ export class LightManager extends EventEmitter {
             const results = [];
 
             for (const [mac, light] of this.lights) {
-                // Skip if not connected (double-check)
-                if (!light.connected) {
+                // Skip if not connected OR the device is busy connecting/setting up
+                if (!light.connected || light.isBusy) {
                     continue;
                 }
 
@@ -147,7 +156,7 @@ export class LightManager extends EventEmitter {
                             results.push(`${light.name}:✓`);
                         }
                     } catch (error) {
-                        // readStatus handles marking as disconnected
+                        // readStatus already marks disconnected & emits
                         results.push(`${light.name}:✗`);
                     }
                 }
@@ -183,7 +192,7 @@ export class LightManager extends EventEmitter {
         }
 
         // Don't try to connect if peripheral says it's connected
-        if (light.peripheral.state === 'connected') {
+        if (light.peripheral && light.peripheral.state === 'connected') {
             console.log(`${light.name} peripheral already connected, cleaning up...`);
             try {
                 await light.peripheral.disconnectAsync();
@@ -218,7 +227,9 @@ export class LightManager extends EventEmitter {
 
             // Force disconnect to clean up
             try {
-                await light.peripheral.disconnectAsync();
+                if (light.peripheral) {
+                    await light.peripheral.disconnectAsync();
+                }
             } catch (e) {
                 // Ignore
             }
@@ -233,8 +244,11 @@ export class LightManager extends EventEmitter {
      * Schedule reconnection attempt
      */
     scheduleReconnect(mac) {
-        if (this.reconnectTimers.has(mac)) {
-            return; // Already scheduled
+        // Always de-dup: clear any existing timer before scheduling a new one
+        const existing = this.reconnectTimers.get(mac);
+        if (existing) {
+            clearTimeout(existing);
+            this.reconnectTimers.delete(mac);
         }
 
         const light = this.lights.get(mac);
@@ -242,62 +256,72 @@ export class LightManager extends EventEmitter {
 
         const timer = setTimeout(async () => {
             this.reconnectTimers.delete(mac); // Remove timer reference
-            const light = this.lights.get(mac);
-            if (light && !light.connected) {
-                console.log(`\n🔄 Reconnecting to ${light.name}...`);
+            const l = this.lights.get(mac);
+            if (!l) {
+                console.log(`   ${mac} missing, skipping`);
+                return;
+            }
+            if (l.connected) {
+                console.log(`   ${l.name} already connected, skipping`);
+                return;
+            }
+            if (l.isBusy) {
+                console.log(`   ${l.name} busy, rescheduling`);
+                this.scheduleReconnect(mac);
+                return;
+            }
 
-                // If we don't have a peripheral, rescan for it
-                if (!light.peripheral || !light.peripheral.address) {
-                    console.log(`  Rescanning for ${light.name}...`);
-                    try {
-                        const discovered = await this.scanner.scan(10000, false); // Scan for 10 sec
-                        const found = discovered.find(l =>
-                            l.address.toLowerCase() === mac.toLowerCase()
-                        );
-                        if (found) {
-                            // Replace placeholder with real NeewerLight
-                            const realLight = new NeewerLight(found.peripheral);
-                            realLight.name = light.name;
-                            this.lights.set(mac, realLight);
+            console.log(`\n🔄 Reconnecting to ${l.name}...`);
 
-                            // Set up handlers
-                            realLight.peripheral.removeAllListeners('disconnect');
-                            realLight.peripheral.once('disconnect', () => {
-                                console.log(`${realLight.name} disconnected!`);
-                                realLight.connected = false;
-                                realLight.state.brightness = 0;
-                                realLight.state.cct = 5600;
-                                this.emitStatus();
-                                this.scheduleReconnect(mac);
-                            });
+            // If we don't have a peripheral, rescan for it
+            if (!l.peripheral || !l.peripheral.address) {
+                console.log(`  Rescanning for ${l.name}...`);
+                try {
+                    const discovered = await this.scanner.scan(10000, false); // Scan for 10 sec
+                    const found = discovered.find(d =>
+                        d.address.toLowerCase() === mac.toLowerCase()
+                    );
+                    if (found) {
+                        // Replace placeholder with real NeewerLight
+                        const realLight = new NeewerLight(found.peripheral);
+                        realLight.name = l.name;
+                        this.lights.set(mac, realLight);
 
-                            realLight.on('stateChanged', (state) => {
-                                this.emitStatus();
-                            });
+                        // Set up handlers
+                        realLight.peripheral.removeAllListeners('disconnect');
+                        realLight.peripheral.once('disconnect', () => {
+                            console.log(`${realLight.name} disconnected!`);
+                            realLight.connected = false;
+                            realLight.state.brightness = 0;
+                            realLight.state.cct = 5600;
+                            this.emitStatus();
+                            this.scheduleReconnect(mac);
+                        });
 
-                            realLight.on('disconnected', () => {
-                                realLight.connected = false;
-                                this.emitStatus();
-                                this.scheduleReconnect(mac);
-                            });
+                        realLight.on('stateChanged', () => {
+                            this.emitStatus();
+                        });
 
-                            console.log(`  Found ${realLight.name}, connecting...`);
-                        } else {
-                            console.log(`  ${light.name} not found in scan`);
-                            this.scheduleReconnect(mac); // Try again
-                            return;
-                        }
-                    } catch (err) {
-                        console.log(`  Scan failed: ${err.message}`);
+                        realLight.on('disconnected', () => {
+                            realLight.connected = false;
+                            this.emitStatus();
+                            this.scheduleReconnect(mac);
+                        });
+
+                        console.log(`  Found ${realLight.name}, connecting...`);
+                    } else {
+                        console.log(`  ${l.name} not found in scan`);
                         this.scheduleReconnect(mac); // Try again
                         return;
                     }
+                } catch (err) {
+                    console.log(`  Scan failed: ${err.message}`);
+                    this.scheduleReconnect(mac); // Try again
+                    return;
                 }
-
-                await this.connectLight(mac);
-            } else {
-                console.log(`   ${light?.name || mac} already connected or missing, skipping`);
             }
+
+            await this.connectLight(mac);
         }, this.reconnectInterval);
 
         this.reconnectTimers.set(mac, timer);
