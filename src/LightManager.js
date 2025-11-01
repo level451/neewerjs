@@ -7,8 +7,8 @@ import { CommandBuilder } from './CommandBuilder.js';
 import { LIGHTS } from './lightConfig.js';
 
 // Tunables
-const INITIAL_SCAN_MS = 5000;      // initial scan
-const RECONNECT_SCAN_MS = 4000;    // rescan for missing lights
+const INITIAL_SCAN_MS = 3000;      // faster first scan (3s) with early-stop
+const RECONNECT_SCAN_MS = 4000;    // shared rescans
 const HOURLY_SWEEP_MS = 60 * 60 * 1000;
 const CONNECT_CONCURRENCY = 2;     // limit concurrent connect/discover
 const CONNECT_STAGGER_MS = 150;    // slight jitter to avoid adapter spikes
@@ -32,18 +32,16 @@ export class LightManager extends EventEmitter {
     }
 
     /**
-     * Run a single scan that everyone can reuse.
+     * Run a single shared scan; pass target MACs for early-stop.
      */
-    async getSharedScan(durationMs) {
+    async getSharedScan(durationMs, targetMacs = null) {
         if (this.activeScanPromise) return this.activeScanPromise;
-        this.activeScanPromise = this.scanner.scan(durationMs, false);
+        // allowDuplicates=true; early stop when all targetMacs are seen
+        this.activeScanPromise = this.scanner.scan(durationMs, true, targetMacs);
         try { return await this.activeScanPromise; }
         finally { this.activeScanPromise = null; }
     }
 
-    /**
-     * Acquire connect slot (semaphore)
-     */
     async acquireConnectSlot() {
         if (this.activeConnects < CONNECT_CONCURRENCY) {
             this.activeConnects++;
@@ -52,10 +50,6 @@ export class LightManager extends EventEmitter {
         await new Promise(res => this.connectQueue.push(res));
         this.activeConnects++;
     }
-
-    /**
-     * Release connect slot
-     */
     releaseConnectSlot() {
         this.activeConnects = Math.max(0, this.activeConnects - 1);
         const next = this.connectQueue.shift();
@@ -69,7 +63,8 @@ export class LightManager extends EventEmitter {
         console.log('Initializing Light Manager...');
         console.log(`Looking for ${LIGHTS.length} configured lights...\n`);
 
-        const discoveredLights = await this.getSharedScan(INITIAL_SCAN_MS);
+        const targetMacs = LIGHTS.map(l => l.mac.toLowerCase());
+        const discoveredLights = await this.getSharedScan(INITIAL_SCAN_MS, targetMacs);
 
         // Seed map and schedule connects
         const tasks = [];
@@ -135,14 +130,12 @@ export class LightManager extends EventEmitter {
             }
         }
 
-        // Await all queued connects (with concurrency limit)
         await Promise.allSettled(tasks);
 
         console.log('\n=== Initialization Complete ===');
         this.emitStatus();
         this.startPolling();
 
-        // Hourly sweep
         setInterval(() => {
             for (const [mac, l] of this.lights) {
                 if (!l.connected && !l.isBusy) this.scheduleReconnect(mac);
@@ -240,8 +233,8 @@ export class LightManager extends EventEmitter {
             if (!l.peripheral || !l.peripheral.address) {
                 console.log(`  Rescanning for ${l.name} (shared)...`);
                 try {
-                    const discovered = await this.getSharedScan(RECONNECT_SCAN_MS);
-                    const found = discovered.find(d => d.address.toLowerCase() === mac.toLowerCase());
+                    const foundList = await this.getSharedScan(RECONNECT_SCAN_MS, [mac.toLowerCase()]);
+                    const found = foundList.find(d => d.address.toLowerCase() === mac.toLowerCase());
                     if (found) {
                         const realLight = new NeewerLight(found.peripheral);
                         realLight.name = l.name;
@@ -264,13 +257,9 @@ export class LightManager extends EventEmitter {
                         });
 
                         console.log(`  Found ${realLight.name}, connecting...`);
-                        // Use semaphore on reconnect too
                         await this.acquireConnectSlot();
-                        try {
-                            await this.connectLight(mac);
-                        } finally {
-                            this.releaseConnectSlot();
-                        }
+                        try { await this.connectLight(mac); }
+                        finally { this.releaseConnectSlot(); }
                         return;
                     } else {
                         console.log(`  ${l.name} not found in shared scan`);

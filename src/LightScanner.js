@@ -14,9 +14,8 @@ export class LightScanner {
      * Check if a peripheral is a Neewer light based on its name
      */
     isNeewerLight(peripheral) {
-        const name = peripheral.advertisement.localName;
+        const name = peripheral.advertisement?.localName;
         if (!name) return false;
-
         const upperName = name.toUpperCase();
         return NEEWER_NAME_PATTERNS.some(pattern =>
             upperName.includes(pattern.toUpperCase())
@@ -32,29 +31,25 @@ export class LightScanner {
                 resolve();
                 return;
             }
-
             const timeout = setTimeout(() => {
                 reject(new Error('Bluetooth adapter did not power on in time'));
             }, 5000);
-
             noble.once('stateChange', (state) => {
                 clearTimeout(timeout);
-                if (state === 'poweredOn') {
-                    resolve();
-                } else {
-                    reject(new Error(`Bluetooth adapter is ${state}`));
-                }
+                if (state === 'poweredOn') resolve();
+                else reject(new Error(`Bluetooth adapter is ${state}`));
             });
         });
     }
 
     /**
-     * Scan for Neewer lights
-     * @param {number} duration - Scan duration in milliseconds
+     * Scan for Neewer lights with early-stop when all targetMacs are seen.
+     * @param {number} duration - Scan duration in ms
      * @param {boolean} allowDuplicates - Whether to report same device multiple times
-     * @returns {Promise<NeewerLight[]>} Array of discovered lights
+     * @param {string[]} targetMacs - Optional list of lowercased MACs to stop early when found
+     * @returns {Promise<NeewerLight[]>}
      */
-    async scan(duration = SCAN_TIMEOUT, allowDuplicates = false) {
+    async scan(duration = SCAN_TIMEOUT, allowDuplicates = true, targetMacs = null) {
         console.log('Waiting for Bluetooth adapter...');
         await this.waitForAdapter();
 
@@ -62,44 +57,60 @@ export class LightScanner {
             this.discoveredLights.clear();
             this.isScanning = true;
 
+            const wantEarlyStop = Array.isArray(targetMacs) && targetMacs.length > 0;
+            const targets = wantEarlyStop ? new Set(targetMacs.map(s => s.toLowerCase())) : null;
+
             console.log(`Scanning for Neewer lights for ${duration / 1000} seconds...`);
 
+            const maybeFinish = () => {
+                if (!wantEarlyStop) return false;
+                // Have we seen all target MACs?
+                for (const mac of targets) {
+                    // noble peripheral.address is lowercase MAC when available
+                    const hit = Array.from(this.discoveredLights.values())
+                        .some(l => (l.address || '').toLowerCase() === mac);
+                    if (!hit) return false;
+                }
+                return true;
+            };
+
+            const stopAndResolve = () => {
+                try { noble.removeListener('discover', onDiscover); } catch {}
+                try { noble.stopScanning(); } catch {}
+                this.isScanning = false;
+                const lights = Array.from(this.discoveredLights.values());
+                console.log(`\nScan complete. Found ${lights.length} Neewer light(s).`);
+                resolve(lights);
+            };
+
             const onDiscover = (peripheral) => {
-                // Filter by RSSI
-                if (peripheral.rssi < RSSI_THRESHOLD) {
-                    return;
-                }
+                // RSSI filter
+                if (typeof peripheral.rssi === 'number' && peripheral.rssi < RSSI_THRESHOLD) return;
 
-                // Check if it's a Neewer light
-                if (!this.isNeewerLight(peripheral)) {
-                    return;
-                }
+                // Match by name
+                if (!this.isNeewerLight(peripheral)) return;
 
-                // Skip duplicates unless requested
-                if (!allowDuplicates && this.discoveredLights.has(peripheral.id)) {
-                    return;
-                }
+                // Track
+                if (!allowDuplicates && this.discoveredLights.has(peripheral.id)) return;
 
                 const light = new NeewerLight(peripheral);
                 this.discoveredLights.set(peripheral.id, light);
-
                 console.log(`Found: ${light.toString()}`);
+
+                // Early stop if all targets are found
+                if (maybeFinish()) {
+                    stopAndResolve();
+                }
             };
 
             noble.on('discover', onDiscover);
 
-            // Start scanning
+            // Start scanning — allowDuplicates true tends to surface devices faster
             noble.startScanning([], allowDuplicates);
 
-            // Stop scanning after timeout
+            // Time-based stop as a fallback
             this.scanTimeout = setTimeout(() => {
-                noble.stopScanning();
-                noble.removeListener('discover', onDiscover);
-                this.isScanning = false;
-
-                const lights = Array.from(this.discoveredLights.values());
-                console.log(`\nScan complete. Found ${lights.length} Neewer light(s).`);
-                resolve(lights);
+                stopAndResolve();
             }, duration);
         });
     }
@@ -121,50 +132,38 @@ export class LightScanner {
     }
 
     /**
-     * Scan and connect to the first found light
-     * @param {number} duration - Scan duration in milliseconds
-     * @returns {Promise<NeewerLight|null>} The connected light or null
+     * Convenience: scan and connect to the first found light
      */
     async scanAndConnectFirst(duration = SCAN_TIMEOUT) {
         const lights = await this.scan(duration);
-
         if (lights.length === 0) {
             console.log('No Neewer lights found.');
             return null;
         }
-
         const light = lights[0];
         await light.connect();
         return light;
     }
 
     /**
-     * Scan and connect to all found lights
-     * @param {number} duration - Scan duration in milliseconds
-     * @returns {Promise<NeewerLight[]>} Array of connected lights
+     * Convenience: scan and connect to all found lights
      */
     async scanAndConnectAll(duration = SCAN_TIMEOUT) {
         const lights = await this.scan(duration);
-
         if (lights.length === 0) {
             console.log('No Neewer lights found.');
             return [];
         }
-
         console.log(`\nConnecting to ${lights.length} light(s)...`);
-
         const connectionPromises = lights.map(light =>
             light.connect().catch(err => {
                 console.error(`Failed to connect to ${light.name}: ${err.message}`);
                 return null;
             })
         );
-
         await Promise.all(connectionPromises);
-
         const connectedLights = lights.filter(light => light.connected);
         console.log(`Successfully connected to ${connectedLights.length} light(s).`);
-
         return connectedLights;
     }
 }
