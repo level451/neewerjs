@@ -7,8 +7,8 @@ import { CommandBuilder } from './CommandBuilder.js';
 import { LIGHTS } from './lightConfig.js';
 
 // Tunables
-const INITIAL_SCAN_MS = 3000;      // initial shared scan (fast, early-stop via target MACs)
-const RECONNECT_SCAN_MS = 4000;    // shared rescans for missing lights
+const INITIAL_SCAN_MS = 13000;      // initial shared scan (fast, early-stop via target MACs)
+const RECONNECT_SCAN_MS = 7600;    // shared rescans for missing lights
 const HOURLY_SWEEP_MS = 60 * 60 * 1000;
 const CONNECT_CONCURRENCY = 2;     // limit concurrent connect/discover
 const CONNECT_STAGGER_MS = 150;    // slight jitter to avoid adapter spikes
