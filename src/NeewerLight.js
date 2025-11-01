@@ -16,7 +16,7 @@ export class NeewerLight extends EventEmitter {
         this.characteristic = null;
         this.notifyCharacteristic = null; // Store for polling
 
-        // New: busy flag so polling/pings don't collide with connect/discover
+        // Busy flag so polling/pings don't collide with connect/discover
         this.isBusy = false;
 
         // Light capabilities (will be determined on connection)
@@ -43,7 +43,6 @@ export class NeewerLight extends EventEmitter {
      * Connect to the light
      */
     async connect(timeout = 15000, retries = 2) {
-        // Avoid parallel connects; let the manager schedule another attempt later
         if (this.connected) {
             console.log(`Light ${this.name} is already connected`);
             return;
@@ -56,100 +55,77 @@ export class NeewerLight extends EventEmitter {
         this.isBusy = true;
         let lastError = null;
 
+        // Known UUIDs (use one-step discovery)
+        const serviceUuid = '69400001b5a3f393e0a9e50e24dcca99';
+        const writeCharUuid = '69400002b5a3f393e0a9e50e24dcca99';
+        const notifyCharUuid = '69400003b5a3f393e0a9e50e24dcca99';
+
+        const DISCOVERY_TIMEOUT_MS = 8000; // more forgiving than 5s
+
         for (let attempt = 1; attempt <= retries; attempt++) {
             try {
                 if (attempt > 1) {
                     console.log(`Retry attempt ${attempt}/${retries}...`);
-                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    await new Promise(res => setTimeout(res, 400 + (attempt - 1) * 200));
                 }
 
                 console.log(`Connecting to ${this.name}...`);
 
                 // Add timeout to connection
                 const connectPromise = this.peripheral.connectAsync();
-                const timeoutPromise = new Promise((_, reject) =>
+                const connTimeout = new Promise((_, reject) =>
                     setTimeout(() => reject(new Error('Connection timeout')), timeout)
                 );
+                await Promise.race([connectPromise, connTimeout]);
+                console.log(`Connected! Discovering handles...`);
 
-                await Promise.race([connectPromise, timeoutPromise]);
-                console.log(`Connected! Setting up characteristics...`);
+                // 📌 One-step discovery: services + characteristics in one call
+                const discoverPromise = this.peripheral.discoverSomeServicesAndCharacteristicsAsync(
+                    [serviceUuid],
+                    [writeCharUuid, notifyCharUuid]
+                );
+                const discTimeout = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Characteristic discovery timeout')), DISCOVERY_TIMEOUT_MS)
+                );
+                const { characteristics } = await Promise.race([discoverPromise, discTimeout]);
 
-                // Known UUIDs
-                const serviceUuid = '69400001b5a3f393e0a9e50e24dcca99';
-                const writeCharUuid = '69400002b5a3f393e0a9e50e24dcca99';
-                const notifyCharUuid = '69400003b5a3f393e0a9e50e24dcca99';
+                this.characteristic = characteristics.find(c => c.uuid === writeCharUuid);
+                this.notifyCharacteristic = characteristics.find(c => c.uuid === notifyCharUuid);
 
-                try {
-                    // Get the service (quick)
-                    const servicePromise = this.peripheral.discoverServicesAsync([serviceUuid]);
-                    const serviceTimeout = new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error('Service discovery timeout')), 5000)
-                    );
-
-                    const services = await Promise.race([servicePromise, serviceTimeout]);
-
-                    if (services.length === 0) {
-                        throw new Error('Neewer service not found');
-                    }
-
-                    const service = services[0];
-
-                    // Get only the two characteristics we need (quick)
-                    const charPromise = service.discoverCharacteristicsAsync([writeCharUuid, notifyCharUuid]);
-                    const charTimeout = new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error('Characteristic discovery timeout')), 5000)
-                    );
-
-                    const chars = await Promise.race([charPromise, charTimeout]);
-
-                    this.characteristic = chars.find(c => c.uuid === writeCharUuid);
-                    this.notifyCharacteristic = chars.find(c => c.uuid === notifyCharUuid);
-
-                    if (!this.characteristic) {
-                        throw new Error('Write characteristic not found');
-                    }
-
-                    console.log(`  ✓ Ready to control`);
-
-                    // Optional: subscribe to notifications
-                    if (this.notifyCharacteristic) {
-                        try {
-                            await this.notifyCharacteristic.subscribeAsync();
-                            this.notifyCharacteristic.on('data', (data) => {
-                                if (data.length < 5) return;
-                                this.parseNotification(data);
-                            });
-                        } catch (err) {
-                            // Notifications not critical - skip if not supported
-                        }
-                    }
-
-                    this.connected = true;
-                    this.isBusy = false;
-                    console.log(`✓ ${this.name} ready`);
-                    return; // Success!
-
-                } catch (error) {
-                    throw new Error(`Setup failed: ${error.message}`);
+                if (!this.characteristic) {
+                    throw new Error('Write characteristic not found');
                 }
+
+                // Optional: subscribe to notifications
+                if (this.notifyCharacteristic) {
+                    try {
+                        await this.notifyCharacteristic.subscribeAsync();
+                        this.notifyCharacteristic.on('data', (data) => {
+                            if (data.length < 5) return;
+                            this.parseNotification(data);
+                        });
+                    } catch (_) {
+                        // Notifications are optional
+                    }
+                }
+
+                this.connected = true;
+                this.isBusy = false;
+                console.log(`✓ ${this.name} ready`);
+                return; // Success!
 
             } catch (error) {
                 lastError = error;
-                console.error(`Attempt ${attempt} failed:`, error.message);
+                console.error(`Attempt ${attempt} failed: ${error.message}`);
 
-                // Try to disconnect if partially connected
-                try {
-                    await this.peripheral.disconnectAsync();
-                } catch (e) {
-                    // Ignore
-                }
+                // Clean up partial connects
+                try { await this.peripheral.disconnectAsync(); } catch (_) {}
 
-                // Continue to next retry if any remain
+                // Continue loop for next retry
             }
         }
 
         this.isBusy = false;
-        // All retries failed
         throw new Error(`Failed to connect after ${retries} attempts: ${lastError?.message || 'unknown error'}`);
     }
 
@@ -157,24 +133,19 @@ export class NeewerLight extends EventEmitter {
      * Read current status from the light
      */
     async readStatus() {
-        // Only verify live connections and valid chars
         if (!this.connected || !this.characteristic || !this.notifyCharacteristic) {
             return;
         }
 
         try {
-            // Lightweight "are you alive" read
-            await this.notifyCharacteristic.readAsync();
-            // If we got here, connection is alive
-
+            await this.notifyCharacteristic.readAsync(); // liveness probe
         } catch (error) {
-            // Mark as dead once and notify manager to schedule reconnect
             if (this.connected) {
                 console.log(`⚠ ${this.name} connection dead during poll: ${error.message}`);
                 this.connected = false;
                 this.emit('disconnected'); // ensure LightManager schedules reconnect
             }
-            throw error; // bubble up to polling summary
+            throw error;
         }
     }
 
@@ -182,40 +153,22 @@ export class NeewerLight extends EventEmitter {
      * Parse notification data from light (when values change)
      */
     parseNotification(data) {
-        // Ignore short messages
-        if (data.length < 5) {
-            return;
-        }
+        if (data.length < 5) return;
 
-        console.log(`🔍 Parsing notification from ${this.name}, length: ${data.length}`);
-
-        // Neewer lights send status updates as notifications
-        // Format: [0x78, 0x87, 0x02, brightness, temp, checksum] for CCT mode
-
+        // Neewer CCT: [0x78, 0x87, 0x02, brightness, tempByte, checksum]
         if (data[0] === 0x78 && data[1] === 0x87) {
-            console.log(`  CCT mode notification detected`);
             const brightness = data[3];
             const tempByte = data[4];
-
-            // Convert temp byte back to Kelvin
             const temperature = Math.round((tempByte - 32) / 53 * 6300 + 3200);
 
-            console.log(`  Parsed: brightness=${brightness}%, temp=${temperature}K`);
-            console.log(`  Current state: brightness=${this.state.brightness}%, temp=${this.state.cct}K`);
-
             const changed = (this.state.brightness !== brightness || this.state.cct !== temperature);
-
             this.state.brightness = brightness;
             this.state.cct = temperature;
 
             if (changed) {
                 console.log(`📢 ${this.name} state changed: ${brightness}% @ ${temperature}K`);
                 this.emit('stateChanged', { brightness, temperature });
-            } else {
-                console.log(`  No change detected`);
             }
-        } else {
-            console.log(`  Unknown notification format (0x${data[0].toString(16)} 0x${data[1].toString(16)})`);
         }
     }
 
@@ -223,9 +176,7 @@ export class NeewerLight extends EventEmitter {
      * Disconnect from the light
      */
     async disconnect() {
-        if (!this.connected) {
-            return;
-        }
+        if (!this.connected) return;
 
         try {
             await this.peripheral.disconnectAsync();
@@ -233,7 +184,7 @@ export class NeewerLight extends EventEmitter {
             this.characteristic = null;
             console.log(`Disconnected from ${this.name}`);
         } catch (error) {
-            console.error(`Failed to disconnect from ${this.name}:`, error.message);
+            console.error(`Failed to disconnect from ${this.name}: ${error.message}`);
         }
     }
 
@@ -244,7 +195,6 @@ export class NeewerLight extends EventEmitter {
         if (!this.connected || !this.characteristic) {
             throw new Error('Light is not connected');
         }
-
         try {
             const buffer = Buffer.from(commandBytes);
             await this.characteristic.writeAsync(buffer, false);
@@ -254,18 +204,10 @@ export class NeewerLight extends EventEmitter {
         }
     }
 
-    /**
-     * Get light info as a formatted string
-     */
     toString() {
-        return `${this.name} (${this.address}) - RSSI: ${this.rssi} dBm - ${
-            this.connected ? 'Connected' : 'Disconnected'
-        }`;
+        return `${this.name} (${this.address}) - RSSI: ${this.rssi} dBm - ${this.connected ? 'Connected' : 'Disconnected'}`;
     }
 
-    /**
-     * Get light info as object
-     */
     toJSON() {
         return {
             id: this.id,
